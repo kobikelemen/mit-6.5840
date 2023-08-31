@@ -22,7 +22,27 @@ type ExampleReply struct {
 	Y int
 }
 
+
+
 // Add your RPC definitions here.
+
+type Err string
+
+type GetNumReducesArgs struct {}
+
+type GetNumReducesReply struct {
+	Err Err
+	NumReduces int
+}
+
+type RequestMappingTaskArgs struct {}
+
+type RequestMappingTaskReply struct {
+	Err Err
+	Filename string
+	Complete bool
+	iFile int
+}
 
 
 // Cook up a unique-ish UNIX-domain socket name

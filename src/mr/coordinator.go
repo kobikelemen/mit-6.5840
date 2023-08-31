@@ -5,11 +5,15 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
 
 
 type Coordinator struct {
 	// Your definitions here.
-
+	nReduces int
+	iFiles int
+	files []string
+	iFilesMut sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -24,6 +28,29 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (c *Coordinator) GetNumReduces(args *GetNumReducesArgs, 
+									reply *GetNumReducesReply) error {
+	reply.NumReduces = c.nReduces
+	return nil
+}
+
+func (c *Coordinator) RequestMappingTask(
+						args *RequestMappingTaskArgs, 
+						reply *RequestMappingTaskReply) error {
+	c.iFilesMut.Lock()
+	if c.iFiles >= len(c.files) {
+		reply.Filename = ""
+		reply.Complete = true
+		reply.iFile = -1
+	} else {
+		reply.Filename = c.files[c.iFiles]
+		reply.Complete = false
+		reply.iFile = c.iFiles
+		c.iFiles ++
+	}
+	c.iFilesMut.Unlock()
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,6 +77,8 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 
+	// Returns when all reduces are finished
+
 
 	return ret
 }
@@ -60,10 +89,10 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	
+	c := Coordinator{nReduces : nReduce, iFiles : 0, files : files}
 
 	// Your code here.
-
 
 	c.server()
 	return &c

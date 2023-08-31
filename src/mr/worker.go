@@ -4,7 +4,12 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
+import "encoding/json"
+// import "sync"
+// import "time"
+import "os"
+import "io/ioutil"
+import "strconv"
 
 //
 // Map functions return a slice of KeyValue.
@@ -25,17 +30,151 @@ func ihash(key string) int {
 }
 
 
+func getIntermediateFiles(iFile, nReduces int) []*os.File {
+	var intrFiles []*os.File = make([]*os.File, 0)
+	for iReduce := 0; iReduce < nReduces; iReduce++ {
+		filename := "mr-" + strconv.Itoa(iFile) + "-" + strconv.Itoa(iReduce)
+		if _, errExists := os.Stat(filename); errExists != nil {
+			// first delete file so contents are reset
+			errDel := os.Remove(filename)
+			if errDel != nil {
+				log.Fatalf("cannot delete %v", filename)
+			}
+		}
+		// recreate file so is empty.
+		// this prevents duplicate KV between runs
+		file, errCreate := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0755)
+		if errCreate != nil {
+			log.Fatalf("cannot create %v", filename)
+		}
+		intrFiles = append(intrFiles, file)
+	}
+	return intrFiles
+}
+
+
+func getEncorders(intermediateFiles []*os.File) []*json.Encoder {
+	encoders := make([]*json.Encoder, 0)
+	for _, file := range intermediateFiles {
+		encoders = append(encoders, json.NewEncoder(file))
+	}
+	return encoders
+}
+
+
+func Mapping(mapf func(string, string) []KeyValue,
+			 inpFilename string, nReduces int, iFile int) {
+	// time.Sleep(time.Duration(1000) * time.Millisecond)
+	file, err := os.Open(inpFilename)
+	if err != nil {
+		log.Fatalf("cannot open %v", inpFilename)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", inpFilename)
+	}
+	intrFiles := getIntermediateFiles(iFile, nReduces)
+	encoders := getEncorders(intrFiles)
+	kva := mapf(inpFilename, string(content))
+	for _, kv := range kva {
+		iReduce := ihash(kv.Key) % nReduces
+		// errEnc := enc.Encode(&kv)
+		errEnc := encoders[iReduce].Encode(&kv)
+		if errEnc != nil {
+			log.Fatalf("cannot encode, err: %v\n", errEnc)
+		}
+	}
+	for _, file := range intrFiles {
+		file.Close()
+	}
+}
+
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+	
+	var nReduces int = CallGetNumReduces()
 
+	fmt.Printf("nReduces worker: %v\n", nReduces)
+	inputFilename, mappingComplete, iFile := CallRequestMappingTask()
+	for !mappingComplete {
+		Mapping(mapf, inputFilename, nReduces, iFile)
+		inputFilename, mappingComplete, iFile = CallRequestMappingTask()
+	}
+
+
+	
+
+	// nMapping := 10 
+	// nMappingComplete := 0
+	// var mutex sync.Mutex
+
+	// for i := range nMapping {
+	// 	go func(iMapping int) {
+	// 		// inputFilename := CallRequestMappingTask(iMapping)
+	// 		// Mapping(mapf, inputFilename, nReduces)
+	// 		mutex.Lock()
+	// 		nMappingComplete++
+	// 		mutex.Unlock()
+	// 	}(i)
+	// }
+
+	// // wait until all threads are complete
+	// mappingComplete := false
+	// for mappingComplete {
+	// 	mutex.Lock()
+	// 	if nMappingComplete == nMapping {
+	// 		mappingComplete = true
+	// 	}
+	// 	mutex.Unlock()
+	// 	time.Sleep(time.Duration(100) * time.Millisecond)
+	// }
+	fmt.Printf("all mapping completed\n")
+
+	// Plan:
+	// - Spin up nMapping threads (need to get nMapping 
+	//	 from coordinator, start hard coded tho...)
+	// - Each thread makes RPC call to get mapping task 
+	// - Call mapf on the return from this
+}
+
+func CallRequestMappingTask() (string, bool, int) {
+	requestMappingTaskArgs := RequestMappingTaskArgs{}
+	requestMappingTaskReply := RequestMappingTaskReply{}
+	ok := call("Coordinator.RequestMappingTask", 
+				&requestMappingTaskArgs, &requestMappingTaskReply)
+	inputFilename := requestMappingTaskReply.Filename
+	complete := requestMappingTaskReply.Complete
+	iFile := requestMappingTaskReply.iFile
+	if ok {
+		fmt.Printf("Mapping task filename: %v\n", inputFilename)
+		fmt.Printf("Mapping tasks complete: %v\n", complete)
+	} else {
+		fmt.Printf("Failed to request mapping task\n")
+	}
+	return inputFilename, complete, iFile
+}
+
+
+func CallGetNumReduces() int {
+	getNumReducesArgs := GetNumReducesArgs{}
+	getNumReducesReply := GetNumReducesReply{}
+	ok := call("Coordinator.GetNumReduces", &getNumReducesArgs, 
+											&getNumReducesReply)
+	if ok {
+		nReduces := getNumReducesReply.NumReduces
+		fmt.Printf("Worker got nReduces as: %v\n", nReduces)
+		return nReduces
+	} else {
+		fmt.Printf("Failed to get nReduces in Worker\n")
+		return -1
+	}
 }
 
 //
