@@ -10,6 +10,7 @@ import "encoding/json"
 import "os"
 import "io/ioutil"
 import "strconv"
+import "sort"
 
 //
 // Map functions return a slice of KeyValue.
@@ -34,7 +35,7 @@ func getIntermediateFiles(iFile, nReduces int) []*os.File {
 	var intrFiles []*os.File = make([]*os.File, 0)
 	for iReduce := 0; iReduce < nReduces; iReduce++ {
 		filename := "mr-" + strconv.Itoa(iFile) + "-" + strconv.Itoa(iReduce)
-		if _, errExists := os.Stat(filename); errExists != nil {
+		if _, errExists := os.Stat(filename); errExists == nil {
 			// first delete file so contents are reset
 			errDel := os.Remove(filename)
 			if errDel != nil {
@@ -89,60 +90,55 @@ func Mapping(mapf func(string, string) []KeyValue,
 	}
 }
 
-//
-// main/mrworker.go calls this function.
-//
-func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+func Reduce(reducef func(string, []string) string, *os.File oFile, iReduce, nFile int) {
 	
-	var nReduces int = CallGetNumReduces()
+	allIntermediate := []KeyValue{}
 
-	fmt.Printf("nReduces worker: %v\n", nReduces)
-	inputFilename, mappingComplete, iFile := CallRequestMappingTask()
-	for !mappingComplete {
-		Mapping(mapf, inputFilename, nReduces, iFile)
-		inputFilename, mappingComplete, iFile = CallRequestMappingTask()
+	for iFile := 0; iFile < nFile; iFile++ {
+		filename := "mr-" + strconv.Itoa(iFile) + "-" + strconv.Itoa(iReduce)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot oen %v\n", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			allIntermediate = append(allIntermediate, kv)
+		}
 	}
 
+	sort.Sort(ByKey(allIntermediate))
 
-	
-
-	// nMapping := 10 
-	// nMappingComplete := 0
-	// var mutex sync.Mutex
-
-	// for i := range nMapping {
-	// 	go func(iMapping int) {
-	// 		// inputFilename := CallRequestMappingTask(iMapping)
-	// 		// Mapping(mapf, inputFilename, nReduces)
-	// 		mutex.Lock()
-	// 		nMappingComplete++
-	// 		mutex.Unlock()
-	// 	}(i)
-	// }
-
-	// // wait until all threads are complete
-	// mappingComplete := false
-	// for mappingComplete {
-	// 	mutex.Lock()
-	// 	if nMappingComplete == nMapping {
-	// 		mappingComplete = true
-	// 	}
-	// 	mutex.Unlock()
-	// 	time.Sleep(time.Duration(100) * time.Millisecond)
-	// }
-	fmt.Printf("all mapping completed\n")
-
-	// Plan:
-	// - Spin up nMapping threads (need to get nMapping 
-	//	 from coordinator, start hard coded tho...)
-	// - Each thread makes RPC call to get mapping task 
-	// - Call mapf on the return from this
+	i := 0
+	for i < len(allIntermediate) {
+		j := i + 1
+		for j < len(allIntermediate) && allIntermediate[j].Key == allIntermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, allIntermediate[k].Value)
+		}
+		output := reducef(allIntermediate[i].Key, values)
+		fmt.Fprintf(oFile, "%v %v\n", allIntermediate[i].Key, output)
+		i = j
+	}
 }
+
+
+func CallRequestReduceTask() (int, bool) {
+	// TODO
+	return iReduce, complete
+}
+
+func CallCompleteReduceTask(iReduce int) {
+	// TODO
+}
+
 
 func CallRequestMappingTask() (string, bool, int) {
 	requestMappingTaskArgs := RequestMappingTaskArgs{}
@@ -151,7 +147,7 @@ func CallRequestMappingTask() (string, bool, int) {
 				&requestMappingTaskArgs, &requestMappingTaskReply)
 	inputFilename := requestMappingTaskReply.Filename
 	complete := requestMappingTaskReply.Complete
-	iFile := requestMappingTaskReply.iFile
+	iFile := requestMappingTaskReply.IFile
 	if ok {
 		fmt.Printf("Mapping task filename: %v\n", inputFilename)
 		fmt.Printf("Mapping tasks complete: %v\n", complete)
@@ -159,6 +155,19 @@ func CallRequestMappingTask() (string, bool, int) {
 		fmt.Printf("Failed to request mapping task\n")
 	}
 	return inputFilename, complete, iFile
+}
+
+
+func CallCompleteMappingTask(iFile int) {
+	completeMappingTaskArgs := CompleteMappingTaskArgs{}
+	completeMappingTaskArgs.IFile = iFile
+	completeMappingTaskReply := CompleteMappingTaskReply{}
+	ok := call("Coordinator.CompleteMappingTask",&completeMappingTaskArgs, &completeMappingTaskReply)
+	if ok {
+		fmt.Printf("Mapping task %v completed\n", iFile)
+	} else {
+		fmt.Printf("Failed to complete mapping task %v\n", iFile)
+	}
 }
 
 
@@ -176,6 +185,12 @@ func CallGetNumReduces() int {
 		return -1
 	}
 }
+
+
+func CallGetNumFile() int {
+	// TODO
+}
+
 
 //
 // example function to show how to make an RPC call to the coordinator.
@@ -227,4 +242,45 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+
+
+
+//
+// main/mrworker.go calls this function.
+//
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	
+	var nReduces int = CallGetNumReduces()
+	var nFile int = CallGetNumFile()
+	fmt.Printf("nReduces worker: %v\n", nReduces)
+	
+	inputFilename, mappingComplete, iFile := CallRequestMappingTask()
+	for !mappingComplete {
+		if iFile != -1 {
+			Mapping(mapf, inputFilename, nReduces, iFile)
+			CallCompleteMappingTask(iFile)
+		}
+		inputFilename, mappingComplete, iFile = CallRequestMappingTask()
+	}
+
+	//TODO: create oFile is doesn't exixt
+
+	iReduce, reduceComplete := CallRequestReduceTask()
+	for !reduceComplete {
+		Reduce(reducef, oFile, iReduce, nFile)
+		CallCompleteReduceTask(iReduce)
+		iReduce, reduceComplete := CallRequestReduceTask()
+	}
+
+
+
+	fmt.Printf("mapping completed\n")
+
+	// Plan:
+	// - Spin up nMapping threads (need to get nMapping 
+	//	 from coordinator, start hard coded tho...)
+	// - Each thread makes RPC call to get mapping task 
+	// - Call mapf on the return from this
 }

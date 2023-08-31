@@ -41,8 +41,26 @@ type RequestMappingTaskReply struct {
 	Err Err
 	Filename string
 	Complete bool
-	iFile int
+	IFile int
 }
+
+type CompleteMappingTaskArgs struct {
+	IFile int
+}
+
+type CompleteMappingTaskReply struct {
+	Err Err
+}
+
+
+
+type RequestReduceTaskArgs struct {}
+
+type RequestReduceTaskReply struct {}
+
+type CompleteReduceTaskArgs struct {}
+
+type CompleteReduceTaskReply struct {}
 
 
 // Cook up a unique-ish UNIX-domain socket name
