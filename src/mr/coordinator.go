@@ -8,6 +8,8 @@ import "net/http"
 import "sync"
 import "time"
 import "fmt"
+import "strings"
+import "io/ioutil"
 
 type Coordinator struct {
 	nReduces int
@@ -18,6 +20,8 @@ type Coordinator struct {
 	intrFilesStatus []TaskStatus
 	intrFilesMut sync.Mutex
 	msTimeout int64
+	reduceComplete bool
+	reduceCompleteMut sync.Mutex
 }
 
 
@@ -35,8 +39,8 @@ func NewCoordinator(msTimeout int64, nReduces int, inpFiles []string) Coordinato
 		inpFilesStatus[i].status = 0
 		inpFilesStatus[i].startTime = time.Now()
 	}
-	intrFilesStatus := make([]TaskStatus, len(nReduces))
-	for i := 0; i < len(nReduces); i++ {
+	intrFilesStatus := make([]TaskStatus, nReduces)
+	for i := 0; i < nReduces; i++ {
 		intrFilesStatus[i].status = 0
 		intrFilesStatus[i].startTime = time.Now()
 	}
@@ -45,7 +49,8 @@ func NewCoordinator(msTimeout int64, nReduces int, inpFiles []string) Coordinato
 		inpFiles : inpFiles,
 		inpFilesStatus : inpFilesStatus,
 		intrFilesStatus : intrFilesStatus,
-		msTimeout : msTimeout}
+		msTimeout : msTimeout,
+		reduceComplete : false}
 }
 
 
@@ -69,19 +74,29 @@ func (c *Coordinator) GetNumReduces(args *GetNumReducesArgs,
 }
 
 
-func (c *Cooridnator) RequestReduceTask(args *RequestReduceTaskArgs, 
+func (c *Coordinator) RequestReduceTask(args *RequestReduceTaskArgs, 
 										reply *RequestReduceTaskReply) error {
-	// TODO
-
 	c.intrFilesMut.Lock()
-	
+	c.TimeoutTasks(c.intrFilesStatus)
+	iReduce, reduceComplete := c.GetTask(c.intrFilesStatus)
+	reply.IReduce = iReduce
+	reply.Complete = reduceComplete
+	if reduceComplete {
+		c.reduceCompleteMut.Lock()
+		c.reduceComplete = true
+		c.reduceCompleteMut.Unlock()
+	}
+	c.intrFilesMut.Unlock()
+	return nil
+
 }
 
 
-func (c *Cooridnator) CompleteReduceTask(args *CompleteReduceTaskArgs, 
+func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs, 
 										reply *CompleteReduceTaskReply) error {
-	// TODO
-
+	fmt.Printf("completed reduce %v\n", args.IReduce)
+	c.intrFilesStatus[args.IReduce].status = 2
+	return nil
 }
 
 
@@ -89,9 +104,9 @@ func (c *Coordinator) RequestMappingTask(
 						args *RequestMappingTaskArgs, 
 						reply *RequestMappingTaskReply) error {
 	c.inpFilesMut.Lock()
-	c.PrintStatus()
-	c.TimeoutMappingTasks()
-	iFile, mappingComplete := c.GetMappingTask() 
+	// c.PrintStatus()
+	c.TimeoutTasks(c.inpFilesStatus)
+	iFile, mappingComplete := c.GetTask(c.inpFilesStatus) 
 	if mappingComplete {
 		reply.Filename = ""
 		reply.Complete = true
@@ -116,7 +131,7 @@ func (c *Coordinator) RequestMappingTask(
 func (c* Coordinator) CompleteMappingTask(
 						args *CompleteMappingTaskArgs, 
 						reply *CompleteMappingTaskReply) error {
-	fmt.Printf("completed %v\n", args.IFile)
+	fmt.Printf("completed mapping %v\n", args.IFile)
 	c.inpFilesStatus[args.IFile].status = 2
 	return nil
 }
@@ -131,14 +146,14 @@ func (c* Coordinator) CompleteMappingTask(
 //
 // finds first mapping task that is not started
 //
-func (c *Coordinator) GetMappingTask() (int, bool) {
+func (c *Coordinator) GetTask(statusArr []TaskStatus) (int, bool) {
 	inProgress := false
-	for iFile := 0; iFile < len(c.inpFilesStatus); iFile++ {
-		if c.inpFilesStatus[iFile].status == 0 {
-			c.inpFilesStatus[iFile].status = 1
-			c.inpFilesStatus[iFile].startTime = time.Now()
+	for iFile := 0; iFile < len(statusArr); iFile++ {
+		if statusArr[iFile].status == 0 {
+			statusArr[iFile].status = 1
+			statusArr[iFile].startTime = time.Now()
 			return iFile, false
-		} else if c.inpFilesStatus[iFile].status == 1 {
+		} else if statusArr[iFile].status == 1 {
 			inProgress = true
 		}
 	}
@@ -153,11 +168,11 @@ func (c *Coordinator) GetMappingTask() (int, bool) {
 // set all in progress mapping statuses that are over
 // timeout threshold to not started
 //
-func (c *Coordinator) TimeoutMappingTasks() {
-	for iFile := 0; iFile < len(c.inpFilesStatus); iFile ++ {
-		var timeTaken int64 = time.Now().Sub(c.inpFilesStatus[iFile].startTime).Milliseconds()
-		if c.inpFilesStatus[iFile].status == 1 && timeTaken >= c.msTimeout {
-			c.inpFilesStatus[iFile].status = 0
+func (c *Coordinator) TimeoutTasks(statusArr []TaskStatus) {
+	for iFile := 0; iFile < len(statusArr); iFile ++ {
+		var timeTaken int64 = time.Now().Sub(statusArr[iFile].startTime).Milliseconds()
+		if statusArr[iFile].status == 1 && timeTaken >= c.msTimeout {
+			statusArr[iFile].status = 0
 		}
 	}
 }
@@ -184,14 +199,9 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	// Returns when all reduces are finished
-
-
-	return ret
+	c.reduceCompleteMut.Lock()
+	defer c.reduceCompleteMut.Unlock()
+	return c.reduceComplete
 }
 
 
@@ -203,12 +213,31 @@ func (c *Coordinator) PrintStatus() {
 	fmt.Printf("\n")
 }
 
+
+func deleteFilesPrefix(prefix string) {
+	files, err := ioutil.ReadDir(".")
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
+	for _, file := range files {
+        if strings.HasPrefix(file.Name(), prefix) {
+            err := os.Remove(file.Name())
+			if err != nil {
+				log.Fatal(err)
+			}
+        }
+    }
+}
+
+
 //
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(inpFiles []string, nReduce int) *Coordinator {
+	deleteFilesPrefix("mr-out-")
 	var msTimeout int64 = 10000
 	c := NewCoordinator(msTimeout, nReduce, inpFiles)
 	c.server()

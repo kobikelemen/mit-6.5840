@@ -20,6 +20,14 @@ type KeyValue struct {
 	Value string
 }
 
+// for sorting by key.
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -54,6 +62,29 @@ func getIntermediateFiles(iFile, nReduces int) []*os.File {
 }
 
 
+func getOutFiles(nReduce int) []*os.File {
+	oFiles := make([]*os.File, 0)
+	for iReduce := 0; iReduce < nReduce; iReduce++ {
+		oName := "mr-out-" + strconv.Itoa(iReduce)
+		var oFile *os.File
+		var err error
+		if _, errExists := os.Stat(oName); errExists != nil {
+			oFile, err = os.Create(oName)
+			if err != nil {
+				log.Fatalf("cannot create file %v\n", oName)
+			}
+		} else {
+			oFile, err = os.Open(oName)
+			if err != nil {
+				log.Fatalf("cannot open file %v\n", oName)
+			} 
+		}
+		oFiles = append(oFiles, oFile)
+	}
+	return oFiles
+}
+
+
 func getEncorders(intermediateFiles []*os.File) []*json.Encoder {
 	encoders := make([]*json.Encoder, 0)
 	for _, file := range intermediateFiles {
@@ -78,7 +109,12 @@ func Mapping(mapf func(string, string) []KeyValue,
 	encoders := getEncorders(intrFiles)
 	kva := mapf(inpFilename, string(content))
 	for _, kv := range kva {
-		iReduce := ihash(kv.Key) % nReduces
+		// if kv.Key == "ABOUT" {
+		// 	fmt.Printf("ABOUT FOUND!\n")
+		// } else if kv.Key == "AN"{
+		// 	fmt.Printf("AN FOUND!\n")
+		// }
+ 		iReduce := ihash(kv.Key) % nReduces
 		// errEnc := enc.Encode(&kv)
 		errEnc := encoders[iReduce].Encode(&kv)
 		if errEnc != nil {
@@ -91,11 +127,10 @@ func Mapping(mapf func(string, string) []KeyValue,
 }
 
 
-func Reduce(reducef func(string, []string) string, *os.File oFile, iReduce, nFile int) {
+func Reduce(reducef func(string, []string) string, oFile *os.File, iReduce, nFile int) {
 	
 	allIntermediate := []KeyValue{}
-
-	for iFile := 0; iFile < nFile; iFile++ {
+	for iFile := 0; iFile <= nFile; iFile++ {
 		filename := "mr-" + strconv.Itoa(iFile) + "-" + strconv.Itoa(iReduce)
 		file, err := os.Open(filename)
 		if err != nil {
@@ -110,9 +145,7 @@ func Reduce(reducef func(string, []string) string, *os.File oFile, iReduce, nFil
 			allIntermediate = append(allIntermediate, kv)
 		}
 	}
-
 	sort.Sort(ByKey(allIntermediate))
-
 	i := 0
 	for i < len(allIntermediate) {
 		j := i + 1
@@ -131,12 +164,27 @@ func Reduce(reducef func(string, []string) string, *os.File oFile, iReduce, nFil
 
 
 func CallRequestReduceTask() (int, bool) {
-	// TODO
+	requestReduceTaskArgs := RequestReduceTaskArgs{}
+	requestReduceTaskReply := RequestReduceTaskReply{}
+	ok := call("Coordinator.RequestReduceTask", 
+				&requestReduceTaskArgs, &requestReduceTaskReply)
+	iReduce := requestReduceTaskReply.IReduce
+	complete := requestReduceTaskReply.Complete
+	if !ok {
+		fmt.Printf("Failed to request Reduce task\n")
+	}
 	return iReduce, complete
 }
 
+
 func CallCompleteReduceTask(iReduce int) {
-	// TODO
+	completeReduceTaskArgs := CompleteReduceTaskArgs{iReduce}
+	completeReduceTaskReply := CompleteReduceTaskReply{}
+	ok := call("Coordinator.CompleteReduceTask", 
+				&completeReduceTaskArgs, &completeReduceTaskReply)
+	if !ok {
+		fmt.Printf("Failed to complete reduce task")
+	}
 }
 
 
@@ -148,10 +196,7 @@ func CallRequestMappingTask() (string, bool, int) {
 	inputFilename := requestMappingTaskReply.Filename
 	complete := requestMappingTaskReply.Complete
 	iFile := requestMappingTaskReply.IFile
-	if ok {
-		fmt.Printf("Mapping task filename: %v\n", inputFilename)
-		fmt.Printf("Mapping tasks complete: %v\n", complete)
-	} else {
+	if !ok {
 		fmt.Printf("Failed to request mapping task\n")
 	}
 	return inputFilename, complete, iFile
@@ -187,9 +232,9 @@ func CallGetNumReduces() int {
 }
 
 
-func CallGetNumFile() int {
-	// TODO
-}
+// func CallGetNumFile() int {
+// 	// TODO
+// }
 
 
 //
@@ -198,16 +243,12 @@ func CallGetNumFile() int {
 // the RPC argument and reply types are defined in rpc.go.
 //
 func CallExample() {
-
 	// declare an argument structure.
 	args := ExampleArgs{}
-
 	// fill in the argument(s).
 	args.X = 99
-
 	// declare a reply structure.
 	reply := ExampleReply{}
-
 	// send the RPC request, wait for the reply.
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
@@ -253,34 +294,32 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	
 	var nReduces int = CallGetNumReduces()
-	var nFile int = CallGetNumFile()
+	// var nFile int = CallGetNumFile()
 	fmt.Printf("nReduces worker: %v\n", nReduces)
-	
 	inputFilename, mappingComplete, iFile := CallRequestMappingTask()
+	nFile := iFile
 	for !mappingComplete {
 		if iFile != -1 {
 			Mapping(mapf, inputFilename, nReduces, iFile)
 			CallCompleteMappingTask(iFile)
 		}
 		inputFilename, mappingComplete, iFile = CallRequestMappingTask()
+		if iFile > nFile {
+			nFile = iFile
+		}
 	}
 
-	//TODO: create oFile is doesn't exixt
+	var oFileArr []*os.File = getOutFiles(nReduces)
+
 
 	iReduce, reduceComplete := CallRequestReduceTask()
 	for !reduceComplete {
-		Reduce(reducef, oFile, iReduce, nFile)
-		CallCompleteReduceTask(iReduce)
-		iReduce, reduceComplete := CallRequestReduceTask()
+		if iReduce != -1 {
+			Reduce(reducef, oFileArr[iReduce], iReduce, nFile)
+			CallCompleteReduceTask(iReduce)
+		}
+		iReduce, reduceComplete = CallRequestReduceTask()
 	}
 
-
-
-	fmt.Printf("mapping completed\n")
-
-	// Plan:
-	// - Spin up nMapping threads (need to get nMapping 
-	//	 from coordinator, start hard coded tho...)
-	// - Each thread makes RPC call to get mapping task 
-	// - Call mapf on the return from this
+	fmt.Printf("reduce completed\n")
 }

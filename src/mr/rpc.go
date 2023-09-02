@@ -56,11 +56,19 @@ type CompleteMappingTaskReply struct {
 
 type RequestReduceTaskArgs struct {}
 
-type RequestReduceTaskReply struct {}
+type RequestReduceTaskReply struct {
+	Err Err
+	IReduce int
+	Complete bool
+}
 
-type CompleteReduceTaskArgs struct {}
+type CompleteReduceTaskArgs struct {
+	IReduce int 
+}
 
-type CompleteReduceTaskReply struct {}
+type CompleteReduceTaskReply struct {
+	Err Err
+}
 
 
 // Cook up a unique-ish UNIX-domain socket name
