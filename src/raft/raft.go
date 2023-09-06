@@ -144,7 +144,6 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term int
 	CandidateId int
-	// (2B stuff TODO)
 
 }
 
@@ -156,16 +155,14 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-// example RequestVote RPC handler.
+
+// - reject if my term is greater than term in args, and reply with my term
+// - can only vote once 
+// - if my term is less than (or equal?) to term in args, step down as leader
+// 		(if applicable), and update term, and vote for server who requested vote
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
-	// 2a:
-	// - reject if my term is greater than term in args, and reply with my term
-	// - can only vote once 
-	// - if my term is less than (or equal?) to term in args, step down as leader
-	// 		(if applicable), and update term, and vote for server who requested vote
-	// - persist who voted for in each term so if crashes doesn't re-vote
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -201,6 +198,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	DPrintf("S%v, vote request from: %v REJECTED, already voted", rf.me, args.CandidateId)
 }
+
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -240,13 +238,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 type AppendEntriesArgs struct {
 	Term int
 	LeaderId int
-	// TODO others
 }
+
 
 type AppendEntriesReply struct {
 	Term int
 	Success bool
 }
+
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// - reject heartbeat if term in args is lower than my term
@@ -349,20 +348,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func voteRemaining(waitCount *int, waitVoteMu *sync.Mutex) int {
-	waitVoteMu.Lock()
-	res := *waitCount
-	waitVoteMu.Unlock()
-	return res
-}
-
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.term ++
 	rf.votedFor = rf.me
 	rf.state = 1
-	votes := 1
+	votes := 1 // vote for myself
 	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
 	vreqArgs := RequestVoteArgs{
 		Term: rf.term, 
@@ -371,19 +363,21 @@ func (rf *Raft) startElection() {
 
 	var waitCount int32 = 0
 	var won int32 = 0
+
 	for vreq := 0; vreq < len(rf.peers); vreq ++ {
 		if vreq != rf.me {
 			atomic.AddInt32(&waitCount, 1)
 
-			go func(rf *Raft, waitCount *int32, 
-					votes *int, vreq int, vreqArgs *RequestVoteArgs, won *int32) {
+			go func(rf *Raft, waitCount *int32, votes *int, vreq int, 
+					vreqArgs *RequestVoteArgs, won *int32) {
 				vreqReply := RequestVoteReply{}
 				ok := rf.sendRequestVote(vreq, vreqArgs, &vreqReply)
 				// only consider response if peer is reachable
 				if ok {
 					rf.mu.Lock()
+					// update term and become follower if peer 
+					// has higher term
 					if vreqReply.Term > rf.term {
-						// update term and become follower
 						rf.updateTerm(vreqReply.Term)
 						rf.state = 0
 					} else if vreqReply.VoteGranted {
@@ -397,11 +391,14 @@ func (rf *Raft) startElection() {
 				}
 				atomic.AddInt32(waitCount, -1)
 
-			} (rf, &waitCount, &votes, vreq, &vreqArgs, &won)
-			
+			} (rf, &waitCount, &votes, vreq, &vreqArgs, &won)	
 		}
 	}
-	
+	// wait for election to finish because either:
+	// 1. recieved replies from all peers
+	// 2. won the election by recieving over half the votes
+	// 3. lost the election by recieving heartbeat from peer
+	//	  with greater than or equal term
 	for atomic.LoadInt32(&waitCount) > 0 && atomic.LoadInt32(&won) == 0 {
 		if rf.getStateCopy() == 0 {  // election lost
 			return
@@ -417,7 +414,6 @@ func (rf *Raft) startElection() {
 		rf.state = 2
 		return			
 	}
-
 }
 
 
@@ -465,18 +461,16 @@ func (rf *Raft) getStateCopy() int {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-		// Check if a leader election should be started.
 
 		rf.mu.Lock()
 		rf.heartbeat = false
 		rf.mu.Unlock()
 
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
+		// pause for a random amount of time between...
 		ms := rf.electionTimeoutMin + (rand.Int63() % rf.electionTimeoutRange)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
-		// - if heartbeat seen is still false then start an election
+		// if heartbeat seen is still false then start an election
 		if !rf.checkHeartbeat() {
 			rf.startElection()
 			if rf.getStateCopy() == 2 {
@@ -512,8 +506,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimeoutMin = 600
 	rf.electionTimeoutRange = 300
 	rf.heartbeatTime = 125
-
-	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
