@@ -35,6 +35,14 @@ type GetNumReducesReply struct {
 	NumReduces int
 }
 
+type GetNumFileArgs struct {}
+
+type GetNumFileReply struct {
+	Err Err
+	NumFile int
+}
+
+
 type RequestMappingTaskArgs struct {}
 
 type RequestMappingTaskReply struct {

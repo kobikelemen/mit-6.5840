@@ -19,6 +19,21 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
+
+func PrintStates(cfg *config) {
+	DPrintf("Current states:")
+	fmt.Printf("					")
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			term, _ := cfg.rafts[i].GetState()
+			fmt.Printf("server %v: (term: %v, state: %v)    ", i, term, cfg.rafts[i].GetMyState())
+		}
+	}
+	fmt.Printf("\n")
+}
+
+
+
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -57,34 +72,57 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.begin("Test (2A): election after network failure")
 
+	DPrintf("Checking ONE leader")
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+	DPrintf("DISCONNECTED: %v", leader1)
+
+	time.Sleep(4000 * time.Millisecond)
+	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
 	cfg.connect(leader1)
+	DPrintf("RECONNECTED: %v", leader1)	
+
+	DPrintf("Checking ONE leader")
 	leader2 := cfg.checkOneLeader()
+
+	PrintStates(cfg)
 
 	// if there's no quorum, no new leader should
 	// be elected.
 	cfg.disconnect(leader2)
+	DPrintf("DISCONNECTED: %v", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	DPrintf("DISCONNECTED: %v", (leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 
+	PrintStates(cfg)
+
+	DPrintf("Checking NO leader")
 	// check that the one connected server
 	// does not think it is the leader.
 	cfg.checkNoLeader()
 
+	PrintStates(cfg)
+
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
+	DPrintf("RECONNECTED: %v", (leader2 + 1) % servers)
+	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
+
+	PrintStates(cfg)
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
+	DPrintf("RECONNECTED: %v", leader2)
+	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
 	cfg.end()

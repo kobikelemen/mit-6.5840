@@ -57,6 +57,15 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	heartbeat bool
+	term int
+	state int // 0: follower
+			  // 1: candidate
+			  // 2: leader
+	votedFor int
+	electionTimeoutMin int64
+	electionTimeoutRange int64
+	heartbeatTime int64
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -64,14 +73,19 @@ type Raft struct {
 
 }
 
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	isLeader := false
+	if rf.state == 2 {
+		isLeader = true
+	}
+	return rf.term, isLeader
+}
 
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+func (rf *Raft) GetMyState() int {
+	return rf.state
 }
 
 // save Raft's persistent state to stable storage,
@@ -128,17 +142,56 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term int
+	CandidateId int
+	// (2B stuff TODO)
+
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term int 
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	// 2a:
+	// - reject if my term is greater than term in args, and reply with my term
+	// - can only vote once 
+	// - if my term is less than (or equal?) to term in args, step down as leader
+	// 		(if applicable), and update term, and vote for server who requested vote
+	// - persist who voted for in each term so if crashes doesn't re-vote
+
+	// reject request if my term is ahead 
+	DPrintf("server: %v, vote request from: %v, for term: %v", rf.me, args.CandidateId, args.Term)
+	if args.Term < rf.term {
+		reply.VoteGranted = false
+		reply.Term = rf.term
+		return
+	}
+	// i have already won the election
+	if args.Term == rf.term && rf.state == 2 {
+		reply.VoteGranted = false
+		reply.Term = rf.term
+		return
+	}
+
+	// become follower and update term if my term is behind
+	if args.Term > rf.term {
+		rf.state = 0
+		rf.updateTerm(args.Term)
+	}
+
+
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		reply.VoteGranted = true
+		reply.Term = rf.term
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -162,7 +215,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // handler function on the server side does not return.  Thus there
 // is no need to implement your own timeouts around Call().
 //
-// look at the comments in ../labrpc/labrpc.go for more details.
+// look at the comments in ../labrpc/labrpc.gofor more details.
 //
 // if you're having trouble getting RPC to work, check that you've
 // capitalized all field names in structs passed over RPC, and
@@ -172,6 +225,86 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
+
+
+
+
+type AppendEntriesArgs struct {
+	Term int
+	LeaderId int
+	// TODO others
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// - reject heartbeat if term in args is lower than my term
+	// - if their term > my term, update my term, convert to follower
+	// - if i am candidate, and recieve heartbeat with term equal to 
+	//	  mine, become a follower (election lost)
+	DPrintf("server: %v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
+	if args.Term < rf.term {
+		reply.Success = false
+		reply.Term = rf.term
+		DPrintf("server: %v, REJECTED HEARTBEAT from lower term", rf.me)
+		return
+	}
+	if args.Term > rf.term {
+		rf.updateTerm(args.Term)
+		rf.state = 0
+		DPrintf("server: %v, UPDATING TERM from HEARTBEAT", rf.me)
+	}
+	// election lost if i am candidate and recieve heartbeat with same term
+	// so become follower
+	if rf.state == 1 && args.Term == rf.term {
+		rf.state = 0
+		DPrintf("server: %v, ELECTION LOST from HEARTBEAT", rf.me)
+	}
+	rf.heartbeat = true
+	reply.Term = rf.term
+	reply.Success = true
+	DPrintf("server: %v, SUCCESS HEARTBEAT", rf.me)
+}
+
+func (rf *Raft) sendAppendEntries(targetServer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	// - send heartbeat to all peers
+	// - if reply contains a rejection because peers term number
+	//    is greater than my tern num, step down as leader
+	DPrintf("server: %v, SENDING HEARTBEAT to: %v", rf.me, targetServer)
+	ok := rf.peers[targetServer].Call("Raft.AppendEntries", args, reply)
+	if !ok {
+		DPrintf("server: %v, HEARTBEAT COUDLN'T REACH: %v", rf.me, targetServer)
+	}
+	return ok
+}
+
+
+func (rf *Raft) broadcastAppendEntries() {
+	args := AppendEntriesArgs{Term: rf.term, LeaderId: rf.me}
+	for i := 0; i < len(rf.peers); i ++ {
+		if i != rf.me {
+			reply := AppendEntriesReply{}
+			ok := rf.sendAppendEntries(i, &args, &reply)
+			// ignore response if peer un-reachable
+			if !ok {
+				continue
+			}
+			// step down as leader if peer has higher term
+			if !reply.Success {
+				rf.updateTerm(reply.Term)
+				rf.state = 0
+				DPrintf("server: %v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
+				return
+			} 
+		}
+	}
+}
+
+
+
 
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -197,6 +330,61 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
+
+func (rf *Raft) startElection() {
+	// - increments term 
+	// - change state to candidate
+	// - votes for myself
+	// - sends vote request to each peer
+	// TODO: restart election after election timeout?
+	rf.term ++
+	DPrintf("server: %v, started ELECTION, for term: %v", rf.me, rf.term)
+	rf.state = 1
+	votes := 1
+	vreqArgs := RequestVoteArgs{
+		Term: rf.term, 
+		CandidateId: rf.me}
+	
+	for vreq := 0; vreq < len(rf.peers); vreq ++ {
+		if vreq != rf.me {
+			// check if election lost (from recieving heartbeat of same term)
+			if rf.state == 0 {
+				return
+			}
+			vreqReply := RequestVoteReply{}
+			ok := rf.sendRequestVote(vreq, &vreqArgs, &vreqReply)
+			// only consider response if peer is reachable
+			if ok {
+				if vreqReply.Term > rf.term {
+					// update term and become follower
+					rf.updateTerm(vreqReply.Term)
+					rf.state = 0
+					return
+				}
+				if vreqReply.VoteGranted {
+					DPrintf("server: %v, recieved vote from: %v", rf.me, vreq)
+					votes ++
+				}
+			}
+			if int(votes / 2) + 1 > len(rf.peers) / 2 {
+				// TODO check if need over half of all peers including down ones, or only working peers
+				DPrintf("server: %v, WON ELECTION", rf.me)
+				rf.state = 2
+				return			
+			}
+		}
+	}
+}
+
+
+func (rf *Raft) leaderLoop() {
+	for rf.killed() == false && rf.state == 2 {
+		rf.broadcastAppendEntries()
+		time.Sleep(time.Duration(rf.heartbeatTime) * time.Millisecond)
+	}
+}
+
+
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -219,15 +407,30 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-		// Your code here (2A)
 		// Check if a leader election should be started.
+
+		// - if follower set heartbeat seen to false
+		rf.heartbeat = false
 
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := rf.electionTimeoutMin + (rand.Int63() % rf.electionTimeoutRange)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+
+		// - if heartbeat seen is still false then start an election
+		if !rf.heartbeat {
+			rf.startElection()
+			if rf.state == 2 {
+				rf.leaderLoop()
+			}
+		}
 	}
+}
+
+func (rf *Raft) updateTerm(newTerm int) {
+	rf.term = newTerm
+	rf.votedFor = -1
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -245,6 +448,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.heartbeat = false
+	rf.state = 0
+	rf.updateTerm(0)
+	rf.electionTimeoutMin = 600
+	rf.electionTimeoutRange = 200
+	rf.heartbeatTime = 125
 
 	// Your initialization code here (2A, 2B, 2C).
 

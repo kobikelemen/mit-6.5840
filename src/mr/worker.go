@@ -109,12 +109,11 @@ func Mapping(mapf func(string, string) []KeyValue,
 	encoders := getEncorders(intrFiles)
 	kva := mapf(inpFilename, string(content))
 	for _, kv := range kva {
+		iReduce := ihash(kv.Key) % nReduces
 		// if kv.Key == "ABOUT" {
-		// 	fmt.Printf("ABOUT FOUND!\n")
-		// } else if kv.Key == "AN"{
-		// 	fmt.Printf("AN FOUND!\n")
+		// 	fmt.Printf("ABOUT FOUND IN MAPPING!\n")
+		// 	fmt.Printf("WRITING TO INTERMEDIATE iFile: %v, iReduce: %v\n", iFile, iReduce)
 		// }
- 		iReduce := ihash(kv.Key) % nReduces
 		// errEnc := enc.Encode(&kv)
 		errEnc := encoders[iReduce].Encode(&kv)
 		if errEnc != nil {
@@ -130,17 +129,29 @@ func Mapping(mapf func(string, string) []KeyValue,
 func Reduce(reducef func(string, []string) string, oFile *os.File, iReduce, nFile int) {
 	
 	allIntermediate := []KeyValue{}
-	for iFile := 0; iFile <= nFile; iFile++ {
+	// if iReduce == 0 {
+	// 	fmt.Printf("REDUCE IN iReduce: 0\n")
+	// }
+	fmt.Printf("REDUCE nFile: %v\n", nFile)
+	for iFile := 0; iFile < nFile; iFile++ {
 		filename := "mr-" + strconv.Itoa(iFile) + "-" + strconv.Itoa(iReduce)
+		fmt.Printf("DOING REDUCE ON " + filename + "\n")
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot oen %v\n", filename)
+			log.Fatalf("cannot open %v\n", filename)
 		}
 		dec := json.NewDecoder(file)
+		// if iFile == 7 && iReduce == 0 {
+		// 	fmt.Printf("REDUCE IN iFile: 7, iReduce: 0\n")
+		// }
 		for {
 			var kv KeyValue
+			
 			if err := dec.Decode(&kv); err != nil {
 				break
+			}
+			if kv.Key == "ABOUT" {
+				fmt.Printf("ABOUT FOUND IN REDUCE!\n")
 			}
 			allIntermediate = append(allIntermediate, kv)
 		}
@@ -154,9 +165,14 @@ func Reduce(reducef func(string, []string) string, oFile *os.File, iReduce, nFil
 		}
 		values := []string{}
 		for k := i; k < j; k++ {
+			
 			values = append(values, allIntermediate[k].Value)
 		}
 		output := reducef(allIntermediate[i].Key, values)
+		if allIntermediate[i].Key == "ABOUT" {
+			fmt.Printf("reducef ON ABOUT!\n")
+			fmt.Printf("%v %v\n", allIntermediate[i].Key, output)
+		}
 		fmt.Fprintf(oFile, "%v %v\n", allIntermediate[i].Key, output)
 		i = j
 	}
@@ -232,9 +248,20 @@ func CallGetNumReduces() int {
 }
 
 
-// func CallGetNumFile() int {
-// 	// TODO
-// }
+func CallGetNumFile() int {
+	getNumFileArgs := GetNumFileArgs{}
+	getNumFileReply := GetNumFileReply{}
+	ok := call("Coordinator.GetNumFile", &getNumFileArgs, 
+											&getNumFileReply)
+	if ok {
+		nFile := getNumFileReply.NumFile
+		fmt.Printf("Worker got nFile as: %v\n", nFile)
+		return nFile
+	} else {
+		fmt.Printf("Failed to get nFile in Worker\n")
+		return -1
+	}
+}
 
 
 //
@@ -294,19 +321,19 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	
 	var nReduces int = CallGetNumReduces()
-	// var nFile int = CallGetNumFile()
+	var nFile int = CallGetNumFile()
 	fmt.Printf("nReduces worker: %v\n", nReduces)
 	inputFilename, mappingComplete, iFile := CallRequestMappingTask()
-	nFile := iFile
+	// nFile := iFile
 	for !mappingComplete {
 		if iFile != -1 {
 			Mapping(mapf, inputFilename, nReduces, iFile)
 			CallCompleteMappingTask(iFile)
 		}
 		inputFilename, mappingComplete, iFile = CallRequestMappingTask()
-		if iFile > nFile {
-			nFile = iFile
-		}
+		// if iFile > nFile {
+		// 	nFile = iFile
+		// }
 	}
 
 	var oFileArr []*os.File = getOutFiles(nReduces)
@@ -315,6 +342,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	iReduce, reduceComplete := CallRequestReduceTask()
 	for !reduceComplete {
 		if iReduce != -1 {
+
 			Reduce(reducef, oFileArr[iReduce], iReduce, nFile)
 			CallCompleteReduceTask(iReduce)
 		}

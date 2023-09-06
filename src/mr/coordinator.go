@@ -22,6 +22,8 @@ type Coordinator struct {
 	msTimeout int64
 	reduceComplete bool
 	reduceCompleteMut sync.Mutex
+	mappingMut sync.Mutex
+	reduceMut sync.Mutex
 }
 
 
@@ -69,24 +71,37 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 func (c *Coordinator) GetNumReduces(args *GetNumReducesArgs, 
 									reply *GetNumReducesReply) error {
+	c.mappingMut.Lock()
 	reply.NumReduces = c.nReduces
+	c.mappingMut.Unlock()
+	return nil
+}
+
+
+func (c *Coordinator) GetNumFile(args *GetNumFileArgs, 
+									reply *GetNumFileReply) error {
+	c.mappingMut.Lock()
+	reply.NumFile = len(c.inpFiles)
+	c.mappingMut.Unlock()
 	return nil
 }
 
 
 func (c *Coordinator) RequestReduceTask(args *RequestReduceTaskArgs, 
 										reply *RequestReduceTaskReply) error {
-	c.intrFilesMut.Lock()
+	// c.intrFilesMut.Lock()
+	c.mappingMut.Lock()
 	c.TimeoutTasks(c.intrFilesStatus)
 	iReduce, reduceComplete := c.GetTask(c.intrFilesStatus)
 	reply.IReduce = iReduce
 	reply.Complete = reduceComplete
 	if reduceComplete {
-		c.reduceCompleteMut.Lock()
+		// c.reduceCompleteMut.Lock()
 		c.reduceComplete = true
-		c.reduceCompleteMut.Unlock()
+		// c.reduceCompleteMut.Unlock()
 	}
-	c.intrFilesMut.Unlock()
+	// c.intrFilesMut.Unlock()
+	c.mappingMut.Unlock()
 	return nil
 
 }
@@ -94,6 +109,8 @@ func (c *Coordinator) RequestReduceTask(args *RequestReduceTaskArgs,
 
 func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs, 
 										reply *CompleteReduceTaskReply) error {
+	c.mappingMut.Lock()
+	defer c.mappingMut.Unlock()
 	fmt.Printf("completed reduce %v\n", args.IReduce)
 	c.intrFilesStatus[args.IReduce].status = 2
 	return nil
@@ -103,7 +120,8 @@ func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs,
 func (c *Coordinator) RequestMappingTask(
 						args *RequestMappingTaskArgs, 
 						reply *RequestMappingTaskReply) error {
-	c.inpFilesMut.Lock()
+	// c.inpFilesMut.Lock()
+	c.mappingMut.Lock()
 	// c.PrintStatus()
 	c.TimeoutTasks(c.inpFilesStatus)
 	iFile, mappingComplete := c.GetTask(c.inpFilesStatus) 
@@ -120,7 +138,8 @@ func (c *Coordinator) RequestMappingTask(
 		reply.Complete = false
 		reply.IFile = iFile
 	}
-	c.inpFilesMut.Unlock()
+	// c.inpFilesMut.Unlock()
+	c.mappingMut.Unlock()
 	return nil
 }
 
@@ -131,6 +150,8 @@ func (c *Coordinator) RequestMappingTask(
 func (c* Coordinator) CompleteMappingTask(
 						args *CompleteMappingTaskArgs, 
 						reply *CompleteMappingTaskReply) error {
+	c.mappingMut.Lock()
+	defer c.mappingMut.Unlock()
 	fmt.Printf("completed mapping %v\n", args.IFile)
 	c.inpFilesStatus[args.IFile].status = 2
 	return nil
@@ -199,8 +220,10 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	c.reduceCompleteMut.Lock()
-	defer c.reduceCompleteMut.Unlock()
+	// c.reduceCompleteMut.Lock()
+	c.mappingMut.Lock()
+	defer c.mappingMut.Unlock()
+	// defer c.reduceCompleteMut.Unlock()
 	return c.reduceComplete
 }
 
