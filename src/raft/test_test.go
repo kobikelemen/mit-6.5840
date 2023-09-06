@@ -135,6 +135,7 @@ func TestManyElections2A(t *testing.T) {
 
 	cfg.begin("Test (2A): multiple elections")
 
+	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
 	iters := 10
@@ -146,16 +147,20 @@ func TestManyElections2A(t *testing.T) {
 		cfg.disconnect(i1)
 		cfg.disconnect(i2)
 		cfg.disconnect(i3)
+		DPrintf("DISCONNECTED: %v %v %v", i1, i2, i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
+		DPrintf("Checking ONE leader")
 		cfg.checkOneLeader()
 
 		cfg.connect(i1)
 		cfg.connect(i2)
 		cfg.connect(i3)
+		DPrintf("RECONNECTED: %v %v %v", i1, i2, i3)
 	}
 
+	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
 	cfg.end()

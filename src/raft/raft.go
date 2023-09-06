@@ -167,17 +167,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 		(if applicable), and update term, and vote for server who requested vote
 	// - persist who voted for in each term so if crashes doesn't re-vote
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.term
+	reply.VoteGranted = false
+
 	// reject request if my term is ahead 
-	DPrintf("server: %v, vote request from: %v, for term: %v", rf.me, args.CandidateId, args.Term)
+	DPrintf("S%v, vote request from: %v, for term: %v", rf.me, args.CandidateId, args.Term)
 	if args.Term < rf.term {
-		reply.VoteGranted = false
-		reply.Term = rf.term
+		DPrintf("S%v, vote request from: %v REJECTED, lower term", rf.me, args.CandidateId)
 		return
 	}
 	// i have already won the election
 	if args.Term == rf.term && rf.state == 2 {
-		reply.VoteGranted = false
-		reply.Term = rf.term
+		DPrintf("S%v, vote request from: %v REJECTED, I won already", rf.me, args.CandidateId)
 		return
 	}
 
@@ -185,13 +189,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.term {
 		rf.state = 0
 		rf.updateTerm(args.Term)
+		DPrintf("S%v, T->%v, becoming follower", rf.me, args.Term)
 	}
 
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		reply.VoteGranted = true
-		reply.Term = rf.term
+		rf.votedFor = args.CandidateId
+		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
+		return
 	}
+	DPrintf("S%v, vote request from: %v REJECTED, already voted", rf.me, args.CandidateId)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -247,28 +255,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//	  mine, become a follower (election lost)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("server: %v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
+	DPrintf("S%v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
 	if args.Term < rf.term {
 		reply.Success = false
 		reply.Term = rf.term
-		DPrintf("server: %v, REJECTED HEARTBEAT from lower term", rf.me)
+		DPrintf("S %v, REJECTED HEARTBEAT from lower T:%v", rf.me, args.Term)
 		return
 	}
 	if args.Term > rf.term {
 		rf.updateTerm(args.Term)
 		rf.state = 0
-		DPrintf("server: %v, UPDATING TERM from HEARTBEAT", rf.me)
+		DPrintf("S%v, T->%v from HEARTBEAT", rf.me, args.Term)
 	}
 	// election lost if i am candidate and recieve heartbeat with same term
 	// so become follower
 	if rf.state == 1 && args.Term == rf.term {
 		rf.state = 0
-		DPrintf("server: %v, ELECTION LOST from HEARTBEAT", rf.me)
+		DPrintf("S%v, ELECTION LOST from HEARTBEAT", rf.me)
 	}
 	rf.heartbeat = true
 	reply.Term = rf.term
 	reply.Success = true
-	DPrintf("server: %v, SUCCESS HEARTBEAT", rf.me)
+	DPrintf("S%v, SUCCESS HEARTBEAT", rf.me)
 }
 
 func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd, 
@@ -276,10 +284,10 @@ func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd,
 	// - send heartbeat to all peers
 	// - if reply contains a rejection because peers term number
 	//    is greater than my tern num, step down as leader
-	DPrintf("server: %v, SENDING HEARTBEAT to: %v", me, iPeer)
+	DPrintf("S%v, SENDING HEARTBEAT to: %v", me, iPeer)
 	ok := targetPeer.Call("Raft.AppendEntries", args, reply)
 	if !ok {
-		DPrintf("server: %v, HEARTBEAT COUDLN'T REACH: %v", me, iPeer)
+		DPrintf("S%v, HEARTBEAT COUDLN'T REACH: %v", me, iPeer)
 	}
 	return ok
 }
@@ -305,7 +313,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					rf.mu.Lock()
 					rf.updateTerm(reply.Term)
 					rf.state = 0
-					DPrintf("server: %v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
+					DPrintf("S%v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
 					rf.mu.Unlock()
 					return
 				} 
@@ -348,10 +356,13 @@ func (rf *Raft) startElection() {
 	// - votes for myself
 	// - sends vote request to each peer
 	// TODO: restart election after election timeout?
+	rf.mu.Lock()
 	rf.term ++
-	DPrintf("server: %v, started ELECTION, for term: %v", rf.me, rf.term)
+	rf.votedFor = rf.me
 	rf.state = 1
 	votes := 1
+	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
+	rf.mu.Unlock()
 	vreqArgs := RequestVoteArgs{
 		Term: rf.term, 
 		CandidateId: rf.me}
@@ -373,13 +384,14 @@ func (rf *Raft) startElection() {
 					return
 				}
 				if vreqReply.VoteGranted {
-					DPrintf("server: %v, recieved vote from: %v", rf.me, vreq)
+					DPrintf("S%v, recieved vote from: %v", rf.me, vreq)
 					votes ++
 				}
 			}
-			if int(votes / 2) + 1 > len(rf.peers) / 2 {
+			// DPrintf("S%v, votes: %v, len(rf.peers) / 2: %v", rf.me, votes, len(rf.peers) / 2)
+			if votes > len(rf.peers) / 2 {
 				// TODO check if need over half of all peers including down ones, or only working peers
-				DPrintf("server: %v, WON ELECTION", rf.me)
+				DPrintf("S%v, WON ELECTION", rf.me)
 				rf.state = 2
 				return			
 			}
@@ -463,7 +475,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = 0
 	rf.updateTerm(0)
 	rf.electionTimeoutMin = 600
-	rf.electionTimeoutRange = 200
+	rf.electionTimeoutRange = 10
 	rf.heartbeatTime = 125
 
 	// Your initialization code here (2A, 2B, 2C).
