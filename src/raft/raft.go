@@ -245,6 +245,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// - if their term > my term, update my term, convert to follower
 	// - if i am candidate, and recieve heartbeat with term equal to 
 	//	  mine, become a follower (election lost)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	DPrintf("server: %v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
 	if args.Term < rf.term {
 		reply.Success = false
@@ -269,36 +271,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("server: %v, SUCCESS HEARTBEAT", rf.me)
 }
 
-func (rf *Raft) sendAppendEntries(targetServer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd, 
+								args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	// - send heartbeat to all peers
 	// - if reply contains a rejection because peers term number
 	//    is greater than my tern num, step down as leader
-	DPrintf("server: %v, SENDING HEARTBEAT to: %v", rf.me, targetServer)
-	ok := rf.peers[targetServer].Call("Raft.AppendEntries", args, reply)
+	DPrintf("server: %v, SENDING HEARTBEAT to: %v", me, iPeer)
+	ok := targetPeer.Call("Raft.AppendEntries", args, reply)
 	if !ok {
-		DPrintf("server: %v, HEARTBEAT COUDLN'T REACH: %v", rf.me, targetServer)
+		DPrintf("server: %v, HEARTBEAT COUDLN'T REACH: %v", me, iPeer)
 	}
 	return ok
 }
 
 
 func (rf *Raft) broadcastAppendEntries() {
-	args := AppendEntriesArgs{Term: rf.term, LeaderId: rf.me}
 	for i := 0; i < len(rf.peers); i ++ {
-		if i != rf.me {
-			reply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(i, &args, &reply)
-			// ignore response if peer un-reachable
-			if !ok {
-				continue
-			}
-			// step down as leader if peer has higher term
-			if !reply.Success {
-				rf.updateTerm(reply.Term)
-				rf.state = 0
-				DPrintf("server: %v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
-				return
-			} 
+		args := AppendEntriesArgs{Term: rf.term, LeaderId: rf.me}
+		if i != rf.me && rf.state == 2 {
+			go func(rf *Raft, i int) {
+				reply := AppendEntriesReply{}
+				rf.mu.Lock()
+				me := rf.me
+				targetPeer := rf.peers[i]
+				rf.mu.Unlock()
+				ok := rf.sendAppendEntries(me, i, targetPeer, &args, &reply)
+				// ignore response if peer un-reachable
+				if !ok {
+					return
+				}
+				// step down as leader if peer has higher term
+				if !reply.Success {
+					rf.mu.Lock()
+					rf.updateTerm(reply.Term)
+					rf.state = 0
+					DPrintf("server: %v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
+					rf.mu.Unlock()
+					return
+				} 
+			} (rf, i)
 		}
 	}
 }
@@ -409,9 +420,9 @@ func (rf *Raft) ticker() {
 
 		// Check if a leader election should be started.
 
-		// - if follower set heartbeat seen to false
+		// mu.Lock()
 		rf.heartbeat = false
-
+		// mu.Unlock()
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.

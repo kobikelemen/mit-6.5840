@@ -79,7 +79,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader1)
 	DPrintf("DISCONNECTED: %v", leader1)
 
-	time.Sleep(4000 * time.Millisecond)
+	// time.Sleep(4000 * time.Millisecond)
 	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
