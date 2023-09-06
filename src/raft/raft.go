@@ -247,11 +247,11 @@ type AppendEntriesReply struct {
 }
 
 
+// - reject heartbeat if term in args is lower than my term
+// - if their term > my term, update my term, convert to follower
+// - if i am candidate, and recieve heartbeat with term equal to 
+//	  mine, become a follower (election lost)
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// - reject heartbeat if term in args is lower than my term
-	// - if their term > my term, update my term, convert to follower
-	// - if i am candidate, and recieve heartbeat with term equal to 
-	//	  mine, become a follower (election lost)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("S%v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
@@ -278,11 +278,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("S%v, SUCCESS HEARTBEAT", rf.me)
 }
 
+
+// - send heartbeat to all peers
+// - if reply contains a rejection because peers term number
+//    is greater than my tern num, step down as leader
 func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd, 
 								args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	// - send heartbeat to all peers
-	// - if reply contains a rejection because peers term number
-	//    is greater than my tern num, step down as leader
 	DPrintf("S%v, SENDING HEARTBEAT to: %v", me, iPeer)
 	ok := targetPeer.Call("Raft.AppendEntries", args, reply)
 	if !ok {
