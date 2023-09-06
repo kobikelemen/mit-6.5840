@@ -296,7 +296,7 @@ func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd,
 func (rf *Raft) broadcastAppendEntries() {
 	for i := 0; i < len(rf.peers); i ++ {
 		args := AppendEntriesArgs{Term: rf.term, LeaderId: rf.me}
-		if i != rf.me && rf.state == 2 {
+		if i != rf.me && rf.getStateCopy() == 2 {
 			go func(rf *Raft, i int) {
 				reply := AppendEntriesReply{}
 				rf.mu.Lock()
@@ -349,59 +349,80 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
+func voteRemaining(waitCount *int, waitVoteMu *sync.Mutex) int {
+	waitVoteMu.Lock()
+	res := *waitCount
+	waitVoteMu.Unlock()
+	return res
+}
+
 
 func (rf *Raft) startElection() {
-	// - increments term 
-	// - change state to candidate
-	// - votes for myself
-	// - sends vote request to each peer
-	// TODO: restart election after election timeout?
 	rf.mu.Lock()
 	rf.term ++
 	rf.votedFor = rf.me
 	rf.state = 1
 	votes := 1
 	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
-	rf.mu.Unlock()
 	vreqArgs := RequestVoteArgs{
 		Term: rf.term, 
-		CandidateId: rf.me}
-	
+		CandidateId: rf.me}	
+	rf.mu.Unlock()
+
+	var waitCount int32 = 0
+	var won int32 = 0
 	for vreq := 0; vreq < len(rf.peers); vreq ++ {
 		if vreq != rf.me {
-			// check if election lost (from recieving heartbeat of same term)
-			if rf.state == 0 {
-				return
-			}
-			vreqReply := RequestVoteReply{}
-			ok := rf.sendRequestVote(vreq, &vreqArgs, &vreqReply)
-			// only consider response if peer is reachable
-			if ok {
-				if vreqReply.Term > rf.term {
-					// update term and become follower
-					rf.updateTerm(vreqReply.Term)
-					rf.state = 0
-					return
+			atomic.AddInt32(&waitCount, 1)
+
+			go func(rf *Raft, waitCount *int32, 
+					votes *int, vreq int, vreqArgs *RequestVoteArgs, won *int32) {
+				vreqReply := RequestVoteReply{}
+				ok := rf.sendRequestVote(vreq, vreqArgs, &vreqReply)
+				// only consider response if peer is reachable
+				if ok {
+					rf.mu.Lock()
+					if vreqReply.Term > rf.term {
+						// update term and become follower
+						rf.updateTerm(vreqReply.Term)
+						rf.state = 0
+					} else if vreqReply.VoteGranted {
+						(*votes) ++
+						if *votes > len(rf.peers) / 2 {
+							atomic.StoreInt32(won, 1)
+						}
+						DPrintf("S%v, recieved vote from: %v, total: %v", rf.me, vreq, *votes)
+					}
+					rf.mu.Unlock()
 				}
-				if vreqReply.VoteGranted {
-					DPrintf("S%v, recieved vote from: %v", rf.me, vreq)
-					votes ++
-				}
-			}
-			// DPrintf("S%v, votes: %v, len(rf.peers) / 2: %v", rf.me, votes, len(rf.peers) / 2)
-			if votes > len(rf.peers) / 2 {
-				// TODO check if need over half of all peers including down ones, or only working peers
-				DPrintf("S%v, WON ELECTION", rf.me)
-				rf.state = 2
-				return			
-			}
+				atomic.AddInt32(waitCount, -1)
+
+			} (rf, &waitCount, &votes, vreq, &vreqArgs, &won)
+			
 		}
 	}
+	
+	for atomic.LoadInt32(&waitCount) > 0 && atomic.LoadInt32(&won) == 0 {
+		if rf.getStateCopy() == 0 {  // election lost
+			return
+		}
+	}
+	DPrintf("S%v, voting COMPLETE")
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if votes > len(rf.peers) / 2 {
+		DPrintf("S%v, WON ELECTION", rf.me)
+		rf.state = 2
+		return			
+	}
+
 }
 
 
 func (rf *Raft) leaderLoop() {
-	for rf.killed() == false && rf.state == 2 {
+	for rf.killed() == false && rf.getStateCopy() == 2 {
 		rf.broadcastAppendEntries()
 		time.Sleep(time.Duration(rf.heartbeatTime) * time.Millisecond)
 	}
@@ -427,14 +448,28 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) checkHeartbeat() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	res := rf.heartbeat
+	return res
+}
+
+func (rf *Raft) getStateCopy() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	res := rf.state
+	return res
+}
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Check if a leader election should be started.
 
-		// mu.Lock()
+		rf.mu.Lock()
 		rf.heartbeat = false
-		// mu.Unlock()
+		rf.mu.Unlock()
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -442,9 +477,9 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		// - if heartbeat seen is still false then start an election
-		if !rf.heartbeat {
+		if !rf.checkHeartbeat() {
 			rf.startElection()
-			if rf.state == 2 {
+			if rf.getStateCopy() == 2 {
 				rf.leaderLoop()
 			}
 		}
@@ -475,7 +510,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = 0
 	rf.updateTerm(0)
 	rf.electionTimeoutMin = 600
-	rf.electionTimeoutRange = 10
+	rf.electionTimeoutRange = 300
 	rf.heartbeatTime = 125
 
 	// Your initialization code here (2A, 2B, 2C).

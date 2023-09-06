@@ -151,6 +151,8 @@ func TestManyElections2A(t *testing.T) {
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
+		PrintStates(cfg)
+		
 		DPrintf("Checking ONE leader")
 		cfg.checkOneLeader()
 
