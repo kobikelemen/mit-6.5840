@@ -190,9 +190,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // and candidates log at least up to date with mine
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		// rf.heartbeat = true // reset timeout if grant vote
+		// 					// no lock needed since locked above
 		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
 		return
 	}
@@ -266,8 +268,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = 0
 		DPrintf("S%v, T->%v from HEARTBEAT", rf.me, args.Term)
 	}
-	// election lost if i am candidate and recieve heartbeat with same term
-	// so become follower
+	// election lost if i am candidate and recieve heartbeat 
+	// with same term so become follower
 	if rf.state == 1 && args.Term == rf.term {
 		rf.state = 0
 		DPrintf("S%v, ELECTION LOST from HEARTBEAT", rf.me)
@@ -405,7 +407,7 @@ func (rf *Raft) startElection() {
 			return
 		}
 	}
-	DPrintf("S%v, voting COMPLETE")
+	DPrintf("S%v, voting COMPLETE", rf.me)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -452,6 +454,12 @@ func (rf *Raft) checkHeartbeat() bool {
 	return res
 }
 
+func (rf *Raft) setHeartbeat(new bool) {
+	rf.mu.Lock()
+	rf.heartbeat = new
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) getStateCopy() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -462,10 +470,7 @@ func (rf *Raft) getStateCopy() int {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-
-		rf.mu.Lock()
-		rf.heartbeat = false
-		rf.mu.Unlock()
+		rf.setHeartbeat(false)
 
 		// pause for a random amount of time between...
 		ms := rf.electionTimeoutMin + (rand.Int63() % rf.electionTimeoutRange)
