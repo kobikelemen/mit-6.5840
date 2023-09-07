@@ -231,6 +231,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if !ok {
+		DPrintf("S%v, VOTE REQUEST COUDLN'T REACH: %v", me, args.CandidateId)
+	}
 	return ok
 }
 
@@ -417,6 +420,7 @@ func (rf *Raft) startElection() {
 		rf.state = 2
 		return			
 	}
+	DPrintf("S%v, didn't recieve enough votes, ELECTION LOST", rf.me)
 }
 
 
