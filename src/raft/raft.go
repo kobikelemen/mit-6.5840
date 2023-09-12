@@ -73,10 +73,6 @@ type Raft struct {
 	matchIndex 			 []int
 	log 				 []LogEntry
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
 }
 
 type LogEntry struct {
@@ -84,6 +80,19 @@ type LogEntry struct {
 	term 	int
 	index 	int
 }
+
+
+// IMPORTANT: first index is 1 !!
+func (rf *Raft) accessLog(index int) *LogEntry {
+	 if index == 0 || index > len(rf.log) {
+		return nil
+	 }
+	 return &rf.log[index]
+}
+
+// func (rf *Raft) getLogTerm(index int) int {
+
+// }
 
 
 // return currentTerm and whether this server
@@ -96,9 +105,11 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.term, isLeader
 }
 
+
 func (rf *Raft) GetMyState() int {
 	return rf.state
 }
+
 
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -153,16 +164,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term 		int
 	CandidateId int
-
+	// TODO: add lastLogindex & lastLogTerm !
 }
+
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term 		int 
 	VoteGranted bool
 }
@@ -173,9 +183,6 @@ type RequestVoteReply struct {
 // - if my term is less than (or equal?) to term in args, step down as leader
 // 		(if applicable), and update term, and vote for server who requested vote
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -200,7 +207,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.updateTerm(args.Term)
 		DPrintf("S%v, T->%v, becoming follower", rf.me, args.Term)
 	}
-
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // and candidates log at least up to date with mine
 		reply.VoteGranted = true
@@ -283,9 +289,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// TODO: reply false if args.PrevLogIndex exceeds length of rf.log
-	// log doesn't contain entry at prevLogIndex with matching term
-	if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+	if args.PrevLogIndex > len(rf.log) || (args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).term != args.PrevLogTerm) {
 		reply.Success = false
 		reply.Term = rf.term
 		return
@@ -352,14 +356,22 @@ func (rf *Raft) checkInLog(entry LogEntry) bool {
 
 func (rf *Raft) getAppendEntriesArgs(iPeer int) AppendEntriesArgs {
 	entries := make([]LogEntry, 0)
-	if len(rf.log) - 1 >= rf.nextIndex[iPeer] {
+	if len(rf.log) >= rf.nextIndex[iPeer] {
 		copy(entries, rf.log[rf.nextIndex[iPeer]:])
 	}
+
+	prevLogIndex := rf.nextIndex[iPeer] - 1
+	prevLogEntry := rf.accessLog(prevLogIndex)
+	var prevLogTerm int = 0
+	if prevLogEntry != nil {
+		prevLogTerm = prevLogEntry.index
+	}
+
 	args := AppendEntriesArgs{
-		Term: rf.term, 
-		LeaderId: rf.me,
-		PrevLogIndex : 	rf.nextIndex[iPeer] - 1,
-		PrevLogTerm : rf.log[rf.commitIndex].term,
+		Term : rf.term, 
+		LeaderId : rf.me,
+		PrevLogIndex : 	prevLogIndex,
+		PrevLogTerm : prevLogTerm,
 		Entries : entries,
 		LeaderCommit : rf.commitIndex,
 	}
@@ -397,8 +409,8 @@ func (rf *Raft) broadcastAppendEntries() {
 						rf.nextIndex[i] --
 						logInconsistency = true
 					} else if reply.Success {
-						rf.nextIndex[i] = len(rf.log) 
-						rf.matchIndex[i] = len(rf.log)
+						rf.nextIndex[i] = len(rf.log) + 1
+						rf.matchIndex[i] = len(rf.log) + 1
 					}
 				}
 			} (rf, i)
@@ -412,16 +424,18 @@ func (rf *Raft) updateCommitIndex() {
 	defer rf.mu.Unlock()
 	majority := int(len(rf.peers) / 2) + 1
 	N := rf.commitIndex + 1
-	// TODO: check if N exceeds log length
+	if N > len(rf.log) + 1 {
+		return
+	}
 	maxN := rf.commitIndex
-	for N < len(rf.log) {
+	for N < len(rf.log) + 1 {
 		count := 0
 		for iPeer := 0; iPeer < len(rf.peers); iPeer ++ {
 			if rf.matchIndex[iPeer] >= N {
 				count ++
 			}
 		}
-		if count >= majority && rf.log[N].term == rf.term {
+		if count >= majority && rf.accessLog(N).term == rf.term {
 			maxN = N
 			N ++
 		} else {
@@ -449,7 +463,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	isLeader := rf.state == 2
 	if isLeader {
-		index = len(rf.log) - 1
+		index = len(rf.log) + 1
 		rf.log = append(rf.log, LogEntry{command : command, 
 										 term : rf.term, 
 										 index : index})
@@ -602,7 +616,7 @@ func (rf *Raft) initIndexState() {
 	rf.nextIndex = nil
 	for i := 0; i < len(rf.peers); i++ {
 		rf.matchIndex = append(rf.matchIndex, 0)
-		rf.nextIndex = append(rf.nextIndex, len(rf.log))
+		rf.nextIndex = append(rf.nextIndex, len(rf.log) + 1)
 	}
 }
 
