@@ -23,7 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"fmt"
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
@@ -76,9 +76,9 @@ type Raft struct {
 }
 
 type LogEntry struct {
-	command interface{}
-	term 	int
-	index 	int
+	Command interface{}
+	Term 	int
+	Index 	int
 }
 
 
@@ -87,12 +87,19 @@ func (rf *Raft) accessLog(index int) *LogEntry {
 	 if index == 0 || index > len(rf.log) {
 		return nil
 	 }
-	 return &rf.log[index]
+	 return &rf.log[index-1]
 }
 
-// func (rf *Raft) getLogTerm(index int) int {
 
-// }
+func (rf *Raft) printLog() {
+	DPrintf("S%v, LOG:", rf.me)
+	fmt.Printf("			")
+	for i := 1; i <= len(rf.log); i ++ {
+		logEntry := rf.accessLog(i)
+		fmt.Printf("IDX:%v T:%v    ", logEntry.Index, logEntry.Term)
+	}
+	fmt.Printf("\n")
+}
 
 
 // return currentTerm and whether this server
@@ -211,8 +218,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // and candidates log at least up to date with mine
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		// rf.heartbeat = true // reset timeout if grant vote
-		// 					// no lock needed since locked above
 		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
 		return
 	}
@@ -281,46 +286,60 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("S%v, RECIEVED HEARTBEAT from: %v", rf.me, args.LeaderId)
+	DPrintf("S%v, RECIEVED APPEND ENTR from: %v", rf.me, args.LeaderId)
 	if args.Term < rf.term {
 		reply.Success = false
 		reply.Term = rf.term
-		DPrintf("S %v, REJECTED HEARTBEAT from lower T:%v", rf.me, args.Term)
+		DPrintf("S %v, REJECTED APPEND ENTR from lower T:%v", rf.me, args.Term)
 		return
 	}
 
-	if args.PrevLogIndex > len(rf.log) || (args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).term != args.PrevLogTerm) {
+	if args.PrevLogIndex > len(rf.log) {
 		reply.Success = false
 		reply.Term = rf.term
+		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v", rf.me, args.PrevLogIndex, args.PrevLogTerm)
+		return
+	} else if args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).Term != args.PrevLogTerm {
+		reply.Success = false
+		reply.Term = rf.term
+		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v, T at prevLogIndex:%v", rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLog(args.PrevLogIndex).Term)
 		return
 	} 
+
 	if len(args.Entries) != 0 {
 		// TODO: num 3 from Figure 2
+		DPrintf("S%v, APPEND ENTR, appending NEW ENTRIES", rf.me)
 		rf.appendNewEntries(args.Entries)
+		rf.printLog()
 	}
 	if args.LeaderCommit > rf.commitIndex {
-		// commitIndex = min(leaderCommit, index of last new entry)
-		lastEntryIdx := args.Entries[len(args.Entries) - 1].index
-		rf.commitIndex = lastEntryIdx
-		if args.LeaderCommit < lastEntryIdx {
+		// set commitIndex = min(leaderCommit, index of last new entry)
+		DPrintf("S%v, APPEND ENTR, leader C: %v > C: %v", rf.me, args.LeaderCommit, rf.commitIndex)
+		lastEntryIndex := 2147483647 // max 32 bit int
+		if len(args.Entries) > 0 {
+			lastEntryIndex = args.Entries[len(args.Entries) - 1].Index
+		}
+		rf.commitIndex = lastEntryIndex
+		if args.LeaderCommit < lastEntryIndex {
 			rf.commitIndex = args.LeaderCommit
 		}
+		DPrintf("S%v, C->%v", rf.me, rf.commitIndex)
 	}
 	if args.Term > rf.term {
 		rf.updateTerm(args.Term)
 		rf.state = 0
-		DPrintf("S%v, T->%v from HEARTBEAT", rf.me, args.Term)
+		DPrintf("S%v, T->%v from APPEND ENTR", rf.me, args.Term)
 	}
 	// election lost if i am candidate and recieve heartbeat 
 	// with same term so become follower
 	if rf.state == 1 && args.Term == rf.term {
 		rf.state = 0
-		DPrintf("S%v, ELECTION LOST from HEARTBEAT", rf.me)
+		DPrintf("S%v, ELECTION LOST from APPEND ENTR", rf.me)
 	}
 	rf.heartbeat = true
 	reply.Term = rf.term
 	reply.Success = true
-	DPrintf("S%v, SUCCESS HEARTBEAT", rf.me)
+	DPrintf("S%v, SUCCESS APPEND ENTR", rf.me)
 }
 
 
@@ -329,10 +348,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //    is greater than my tern num, step down as leader
 func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd, 
 								args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	DPrintf("S%v, SENDING HEARTBEAT to: %v", me, iPeer)
+	DPrintf("S%v, SENDING APPEND ENTR to: %v, len(entries): %v", me, iPeer, len(args.Entries))
 	ok := targetPeer.Call("Raft.AppendEntries", args, reply)
 	if !ok {
-		DPrintf("S%v, HEARTBEAT COUDLN'T REACH: %v", me, iPeer)
+		DPrintf("S%v, APPEND ENTR COUDLN'T REACH: %v", me, iPeer)
 	}
 	return ok
 }
@@ -357,14 +376,16 @@ func (rf *Raft) checkInLog(entry LogEntry) bool {
 func (rf *Raft) getAppendEntriesArgs(iPeer int) AppendEntriesArgs {
 	entries := make([]LogEntry, 0)
 	if len(rf.log) >= rf.nextIndex[iPeer] {
-		copy(entries, rf.log[rf.nextIndex[iPeer]:])
+		for i := rf.nextIndex[iPeer]; i <= len(rf.log); i ++ {
+			entries = append(entries, *rf.accessLog(i))
+		}
 	}
 
 	prevLogIndex := rf.nextIndex[iPeer] - 1
 	prevLogEntry := rf.accessLog(prevLogIndex)
 	var prevLogTerm int = 0
 	if prevLogEntry != nil {
-		prevLogTerm = prevLogEntry.index
+		prevLogTerm = prevLogEntry.Index
 	}
 
 	args := AppendEntriesArgs{
@@ -403,14 +424,18 @@ func (rf *Raft) broadcastAppendEntries() {
 					if !reply.Success && reply.Term > rf.term{
 						rf.updateTerm(reply.Term)
 						rf.state = 0
-						DPrintf("S%v, HEARTBEAT to: %v REJECTED, becoming follower ", rf.me, i)
+						DPrintf("S%v, APPEND ENTR to: %v REJECTED, peer T%v > my T%v, becoming follower ", rf.me, i, reply.Term, rf.term)
 						return
 					} else if !reply.Success { // log incosistency 
 						rf.nextIndex[i] --
 						logInconsistency = true
+						DPrintf("S%v, APPEND ENTR to: %v REJECTED, log inconsistency, RETRYING", rf.me, i)
 					} else if reply.Success {
-						rf.nextIndex[i] = len(rf.log) + 1
-						rf.matchIndex[i] = len(rf.log) + 1
+						nextIndex := len(rf.log) + 1
+						matchIndex := len(rf.log)
+						rf.nextIndex[i] = nextIndex
+						rf.matchIndex[i] = matchIndex
+						DPrintf("S%v, APPEND ENTR to: %v, SUCCESS, peer next IDX->%v, peer match IDX->%v", rf.me, i, nextIndex, matchIndex)
 					}
 				}
 			} (rf, i)
@@ -419,9 +444,19 @@ func (rf *Raft) broadcastAppendEntries() {
 }
 
 
+func (rf *Raft) printPeerIndexes(peerIndexes []int) {
+	for i := 0; i < len(peerIndexes); i ++ {
+		fmt.Printf("%v ", peerIndexes[i])
+	}
+	fmt.Printf("\n")
+ }
+
+
 func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	fmt.Printf("S%v rf.matchIndex:   ", rf.me)
+	rf.printPeerIndexes(rf.matchIndex)
 	majority := int(len(rf.peers) / 2) + 1
 	N := rf.commitIndex + 1
 	if N > len(rf.log) + 1 {
@@ -435,14 +470,20 @@ func (rf *Raft) updateCommitIndex() {
 				count ++
 			}
 		}
-		if count >= majority && rf.accessLog(N).term == rf.term {
+		if count >= majority && rf.accessLog(N).Term == rf.term {
+			// DPrintf("S%v, updateCommitIndex count:%v, num servers:%v, N:%v",rf.me, count, len(rf.peers), N)
 			maxN = N
 			N ++
 		} else {
 			break
 		}
 	}
-	rf.commitIndex = maxN
+	if rf.commitIndex != maxN {
+		rf.commitIndex = maxN
+		rf.matchIndex[rf.me] = rf.commitIndex
+		rf.nextIndex[rf.me] = rf.commitIndex + 1
+		DPrintf("S%v, C->%v", rf.me, rf.commitIndex)
+	}
 }
 
 
@@ -464,9 +505,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.state == 2
 	if isLeader {
 		index = len(rf.log) + 1
-		rf.log = append(rf.log, LogEntry{command : command, 
-										 term : rf.term, 
-										 index : index})
+		rf.log = append(rf.log, LogEntry{Command : command, 
+										 Term : rf.term, 
+										 Index : index})
+		DPrintf("S%v, APPEND LOG, T:%v, IDX:%v", rf.me, rf.term, index)
+		rf.printLog()
 	}
 	return index, rf.term, isLeader
 }
