@@ -57,6 +57,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	applyCh   chan ApplyMsg
 	heartbeat bool
 	term 	  int
 	state 	  int // 0: follower
@@ -72,6 +73,7 @@ type Raft struct {
 	nextIndex 			 []int
 	matchIndex 			 []int
 	log 				 []LogEntry
+
 
 }
 
@@ -278,6 +280,36 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (rf *Raft) sendApplyMsg(prevCommitIndex, commitIndex int) {
+	for i := prevCommitIndex + 1; i <= commitIndex; i ++ {
+		logEntry := rf.accessLog(i)
+		applyMsg := ApplyMsg{
+			CommandValid : true,
+			Command : logEntry.Command,
+			CommandIndex : logEntry.Index,
+		}
+		rf.applyCh <- applyMsg
+	}
+}
+
+
+func (rf *Raft) commitLog(args *AppendEntriesArgs) {
+	// set commitIndex = min(leaderCommit, index of last new entry)
+	prevCommitIndex := rf.commitIndex
+	DPrintf("S%v, APPEND ENTR, leader C: %v > C: %v", rf.me, args.LeaderCommit, rf.commitIndex)
+	lastEntryIndex := 2147483647 // max 32 bit int
+	if len(args.Entries) > 0 {
+		lastEntryIndex = args.Entries[len(args.Entries) - 1].Index
+	}
+	rf.commitIndex = lastEntryIndex
+	if args.LeaderCommit < lastEntryIndex {
+		rf.commitIndex = args.LeaderCommit
+	}
+	DPrintf("S%v, C->%v", rf.me, rf.commitIndex)
+	rf.sendApplyMsg(prevCommitIndex, rf.commitIndex)
+	DPrintf("S%v, sendApplyMsg done", rf.me)
+}
+
 
 // - reject heartbeat if term in args is lower than my term
 // - if their term > my term, update my term, convert to follower
@@ -297,12 +329,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.log) {
 		reply.Success = false
 		reply.Term = rf.term
-		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v", rf.me, args.PrevLogIndex, args.PrevLogTerm)
+		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v", 
+				rf.me, args.PrevLogIndex, args.PrevLogTerm)
 		return
 	} else if args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).Term != args.PrevLogTerm {
 		reply.Success = false
 		reply.Term = rf.term
-		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v, T at prevLogIndex:%v", rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLog(args.PrevLogIndex).Term)
+		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v, T at prevLogIndex:%v", 
+				rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLog(args.PrevLogIndex).Term)
 		return
 	} 
 
@@ -313,17 +347,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.printLog()
 	}
 	if args.LeaderCommit > rf.commitIndex {
-		// set commitIndex = min(leaderCommit, index of last new entry)
-		DPrintf("S%v, APPEND ENTR, leader C: %v > C: %v", rf.me, args.LeaderCommit, rf.commitIndex)
-		lastEntryIndex := 2147483647 // max 32 bit int
-		if len(args.Entries) > 0 {
-			lastEntryIndex = args.Entries[len(args.Entries) - 1].Index
-		}
-		rf.commitIndex = lastEntryIndex
-		if args.LeaderCommit < lastEntryIndex {
-			rf.commitIndex = args.LeaderCommit
-		}
-		DPrintf("S%v, C->%v", rf.me, rf.commitIndex)
+		rf.commitLog(args)
 	}
 	if args.Term > rf.term {
 		rf.updateTerm(args.Term)
@@ -380,14 +404,12 @@ func (rf *Raft) getAppendEntriesArgs(iPeer int) AppendEntriesArgs {
 			entries = append(entries, *rf.accessLog(i))
 		}
 	}
-
 	prevLogIndex := rf.nextIndex[iPeer] - 1
 	prevLogEntry := rf.accessLog(prevLogIndex)
 	var prevLogTerm int = 0
 	if prevLogEntry != nil {
-		prevLogTerm = prevLogEntry.Index
+		prevLogTerm = prevLogEntry.Term
 	}
-
 	args := AppendEntriesArgs{
 		Term : rf.term, 
 		LeaderId : rf.me,
@@ -503,7 +525,9 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	isLeader := rf.state == 2
+
 	if isLeader {
+		DPrintf("S%v, Start(), command:%v", rf.me, command)
 		index = len(rf.log) + 1
 		rf.log = append(rf.log, LogEntry{Command : command, 
 										 Term : rf.term, 
@@ -585,7 +609,12 @@ func (rf *Raft) startElection() {
 func (rf *Raft) leaderLoop() {
 	for rf.killed() == false && rf.getStateCopy() == 2 {
 		rf.broadcastAppendEntries()
+		prevCommitIndex := rf.commitIndex
 		rf.updateCommitIndex()
+		if prevCommitIndex != rf.commitIndex {
+			rf.sendApplyMsg(prevCommitIndex, rf.commitIndex)
+			DPrintf("S%v, sendApplyMsg done", rf.me)
+		}
 		time.Sleep(time.Duration(rf.heartbeatTime) * time.Millisecond)
 	}
 }
@@ -689,6 +718,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, 0)
 	rf.matchIndex = make([]int, 0)
 	rf.log = make([]LogEntry, 0)
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -505,6 +505,9 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			}
 			count += 1
 			cmd = cmd1
+			// fmt.Printf("nCommited(), command SET\n")
+		} else {
+			// fmt.Printf("nCommited(), command NOT SET\n")
 		}
 	}
 	return count, cmd
@@ -582,6 +585,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				// fmt.Printf("nd:%v   expectedServers:%v\n", nd, expectedServers)
+				// fmt.Printf("cmd1:%v   cmd:%v\n", cmd1, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
