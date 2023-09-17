@@ -263,8 +263,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 
-
-
 type AppendEntriesArgs struct {
 	Term 		 int
 	LeaderId 	 int
@@ -279,6 +277,7 @@ type AppendEntriesReply struct {
 	Term 	int
 	Success bool
 }
+
 
 func (rf *Raft) sendApplyMsg(prevCommitIndex, commitIndex int) {
 	for i := prevCommitIndex + 1; i <= commitIndex; i ++ {
@@ -479,7 +478,9 @@ func (rf *Raft) updateCommitIndex() {
 	defer rf.mu.Unlock()
 	fmt.Printf("S%v rf.matchIndex:   ", rf.me)
 	rf.printPeerIndexes(rf.matchIndex)
-	majority := int(len(rf.peers) / 2) + 1
+	// duplicated on e.g. 2/5 peer forms 
+	// majority when including leader
+	majority := int(len(rf.peers) / 2)
 	N := rf.commitIndex + 1
 	if N > len(rf.log) + 1 {
 		return
