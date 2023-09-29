@@ -8,17 +8,18 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
-
 
 func PrintStates(cfg *config) {
 	DPrintf("Current states:")
@@ -31,8 +32,6 @@ func PrintStates(cfg *config) {
 	}
 	fmt.Printf("\n")
 }
-
-
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -87,7 +86,7 @@ func TestReElection2A(t *testing.T) {
 	// disturb the new leader. and the old leader
 	// should switch to follower.
 	cfg.connect(leader1)
-	DPrintf("RECONNECTED: %v", leader1)	
+	DPrintf("RECONNECTED: %v", leader1)
 
 	DPrintf("Checking ONE leader")
 	leader2 := cfg.checkOneLeader()
@@ -99,7 +98,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader2)
 	DPrintf("DISCONNECTED: %v", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	DPrintf("DISCONNECTED: %v", (leader2 + 1) % servers)
+	DPrintf("DISCONNECTED: %v", (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 
 	PrintStates(cfg)
@@ -113,7 +112,7 @@ func TestReElection2A(t *testing.T) {
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	DPrintf("RECONNECTED: %v", (leader2 + 1) % servers)
+	DPrintf("RECONNECTED: %v", (leader2+1)%servers)
 	DPrintf("Checking ONE leader")
 	cfg.checkOneLeader()
 
@@ -152,7 +151,7 @@ func TestManyElections2A(t *testing.T) {
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
 		PrintStates(cfg)
-		
+
 		DPrintf("Checking ONE leader")
 		cfg.checkOneLeader()
 
@@ -323,6 +322,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	DPrintf("DISCONNECTED S%v", leader+1)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -334,6 +334,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+	DPrintf("RECONNECTED S%v", leader+1)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree

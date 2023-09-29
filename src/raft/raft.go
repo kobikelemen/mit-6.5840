@@ -84,7 +84,7 @@ type LogEntry struct {
 }
 
 
-// IMPORTANT: first index is 1 !!
+// IMPORTANT: first index is 1
 func (rf *Raft) accessLog(index int) *LogEntry {
 	 if index == 0 || index > len(rf.log) {
 		return nil
@@ -98,7 +98,7 @@ func (rf *Raft) printLog() {
 	fmt.Printf("			")
 	for i := 1; i <= len(rf.log); i ++ {
 		logEntry := rf.accessLog(i)
-		fmt.Printf("IDX:%v T:%v    ", logEntry.Index, logEntry.Term)
+		fmt.Printf("IDX:%v T:%v CMD:%v   ", logEntry.Index, logEntry.Term, logEntry.Command)
 	}
 	fmt.Printf("\n")
 }
@@ -173,9 +173,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	Term 		int
-	CandidateId int
-	// TODO: add lastLogindex & lastLogTerm !
+	Term 		 int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 
@@ -217,13 +218,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("S%v, T->%v, becoming follower", rf.me, args.Term)
 	}
 
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // and candidates log at least up to date with mine
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isCandUpToDate(
+																	args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
 		return
 	}
 	DPrintf("S%v, vote request from: %v REJECTED, already voted", rf.me, args.CandidateId)
+}
+
+
+func (rf *Raft) isCandUpToDate(candLastLogIndex, candLastLogTerm int) bool {
+	lastLogTerm := 0
+	if len(rf.log) > 0 {
+		lastLogTerm = rf.accessLog(len(rf.log)).Term
+	}
+	if candLastLogTerm != rf.term {
+		return candLastLogTerm >= lastLogTerm
+	}
+	return candLastLogIndex >= len(rf.log)
 }
 
 
@@ -440,24 +454,28 @@ func (rf *Raft) broadcastAppendEntries() {
 						return
 					}
 					rf.mu.Lock()
-					defer rf.mu.Unlock()
 					// step down as leader if peer has higher term
 					if !reply.Success && reply.Term > rf.term{
 						rf.updateTerm(reply.Term)
 						rf.state = 0
-						DPrintf("S%v, APPEND ENTR to: %v REJECTED, peer T%v > my T%v, becoming follower ", rf.me, i, reply.Term, rf.term)
+						DPrintf("S%v, APPEND ENTR to: %v REJECTED, peer T%v > my T%v, becoming follower ", 
+								rf.me, i, reply.Term, rf.term)
+						rf.mu.Unlock()
 						return
 					} else if !reply.Success { // log incosistency 
 						rf.nextIndex[i] --
 						logInconsistency = true
-						DPrintf("S%v, APPEND ENTR to: %v REJECTED, log inconsistency, RETRYING", rf.me, i)
+						DPrintf("S%v, APPEND ENTR to: %v REJECTED, log inconsistency, RETRYING", 
+									rf.me, i)
 					} else if reply.Success {
 						nextIndex := len(rf.log) + 1
 						matchIndex := len(rf.log)
 						rf.nextIndex[i] = nextIndex
 						rf.matchIndex[i] = matchIndex
-						DPrintf("S%v, APPEND ENTR to: %v, SUCCESS, peer next IDX->%v, peer match IDX->%v", rf.me, i, nextIndex, matchIndex)
+						DPrintf("S%v, APPEND ENTR to: %v, SUCCESS, peer next IDX->%v, peer match IDX->%v", 
+									rf.me, i, nextIndex, matchIndex)
 					}
+					rf.mu.Unlock()
 				}
 			} (rf, i)
 		}
@@ -540,6 +558,25 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 
+func (rf *Raft) getRequestVoteArgs() RequestVoteArgs {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastLogEntry := rf.accessLog(len(rf.log))
+	vreqArgs := RequestVoteArgs{
+		Term: rf.term, 
+		CandidateId: rf.me,
+	}
+	if lastLogEntry != nil {
+		vreqArgs.LastLogIndex = lastLogEntry.Index
+		vreqArgs.LastLogTerm = lastLogEntry.Term	
+	} else {
+		vreqArgs.LastLogIndex = 0
+		vreqArgs.LastLogTerm = 0
+	}
+	return vreqArgs
+}
+
+
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.term ++
@@ -547,9 +584,9 @@ func (rf *Raft) startElection() {
 	rf.state = 1
 	votes := 1 // vote for myself
 	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
-	vreqArgs := RequestVoteArgs{
-		Term: rf.term, 
-		CandidateId: rf.me}	
+	// vreqArgs := RequestVoteArgs{
+	// 	Term: rf.term, 
+	// 	CandidateId: rf.me}	
 	rf.mu.Unlock()
 
 	var waitCount int32 = 0
@@ -559,10 +596,11 @@ func (rf *Raft) startElection() {
 		if vreq != rf.me {
 			atomic.AddInt32(&waitCount, 1)
 
-			go func(rf *Raft, waitCount *int32, votes *int, vreq int, 
-					vreqArgs *RequestVoteArgs, won *int32) {
+			go func(rf *Raft, waitCount *int32, 
+					votes *int, vreq int, won *int32) {
+				vreqArgs := rf.getRequestVoteArgs()
 				vreqReply := RequestVoteReply{}
-				ok := rf.sendRequestVote(vreq, vreqArgs, &vreqReply)
+				ok := rf.sendRequestVote(vreq, &vreqArgs, &vreqReply)
 				// only consider response if peer is reachable
 				if ok {
 					rf.mu.Lock()
@@ -582,7 +620,7 @@ func (rf *Raft) startElection() {
 				}
 				atomic.AddInt32(waitCount, -1)
 
-			} (rf, &waitCount, &votes, vreq, &vreqArgs, &won)	
+			} (rf, &waitCount, &votes, vreq, &won)	
 		}
 	}
 	// wait for election to finish because either:
