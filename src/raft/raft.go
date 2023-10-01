@@ -288,8 +288,10 @@ type AppendEntriesArgs struct {
 
 
 type AppendEntriesReply struct {
-	Term 	int
-	Success bool
+	Term       int
+	Success    bool
+	FailReason int // 1 is because term < currentTerm
+				   // 2 is because log doesn't match
 }
 
 
@@ -334,6 +336,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("S%v, RECIEVED APPEND ENTR from: %v", rf.me, args.LeaderId)
 	if args.Term < rf.term {
 		reply.Success = false
+		reply.FailReason = 1
 		reply.Term = rf.term
 		DPrintf("S %v, REJECTED APPEND ENTR from lower T:%v", rf.me, args.Term)
 		return
@@ -341,12 +344,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex > len(rf.log) {
 		reply.Success = false
+		reply.FailReason = 2
 		reply.Term = rf.term
 		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v", 
 				rf.me, args.PrevLogIndex, args.PrevLogTerm)
 		return
 	} else if args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).Term != args.PrevLogTerm {
 		reply.Success = false
+		reply.FailReason = 2
 		reply.Term = rf.term
 		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v, T at prevLogIndex:%v", 
 				rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLog(args.PrevLogIndex).Term)
@@ -455,14 +460,14 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 					rf.mu.Lock()
 					// step down as leader if peer has higher term
-					if !reply.Success && reply.Term > rf.term{
+					if !reply.Success && reply.FailReason == 1 {
 						rf.updateTerm(reply.Term)
 						rf.state = 0
 						DPrintf("S%v, APPEND ENTR to: %v REJECTED, peer T%v > my T%v, becoming follower ", 
 								rf.me, i, reply.Term, rf.term)
 						rf.mu.Unlock()
 						return
-					} else if !reply.Success { // log incosistency 
+					} else if !reply.Success && reply.FailReason == 2 { // log incosistency 
 						rf.nextIndex[i] --
 						logInconsistency = true
 						DPrintf("S%v, APPEND ENTR to: %v REJECTED, log inconsistency, RETRYING", 
@@ -511,8 +516,13 @@ func (rf *Raft) updateCommitIndex() {
 				count ++
 			}
 		}
+		// if N == 4 {
+			fmt.Printf("No. peers with IDX >= %v: %v, majority:%v, Nth log term:%v, my term:%v\n", N, count, majority, rf.accessLog(N).Term, rf.term)
+		// }
 		if count >= majority && rf.accessLog(N).Term == rf.term {
-			// DPrintf("S%v, updateCommitIndex count:%v, num servers:%v, N:%v",rf.me, count, len(rf.peers), N)
+			if N == 6 {
+				fmt.Printf("count exceeds majority\n")
+			}
 			maxN = N
 			N ++
 		} else {
@@ -552,7 +562,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 										 Term : rf.term, 
 										 Index : index})
 		DPrintf("S%v, APPEND LOG, T:%v, IDX:%v", rf.me, rf.term, index)
+		rf.mu.Lock()
 		rf.printLog()
+		rf.mu.Unlock()
 	}
 	return index, rf.term, isLeader
 }
@@ -584,11 +596,7 @@ func (rf *Raft) startElection() {
 	rf.state = 1
 	votes := 1 // vote for myself
 	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
-	// vreqArgs := RequestVoteArgs{
-	// 	Term: rf.term, 
-	// 	CandidateId: rf.me}	
 	rf.mu.Unlock()
-
 	var waitCount int32 = 0
 	var won int32 = 0
 

@@ -322,7 +322,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	DPrintf("DISCONNECTED S%v", leader+1)
+	DPrintf("DISCONNECTED S%v", (leader+1) % servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -334,7 +334,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	DPrintf("RECONNECTED S%v", leader+1)
+	DPrintf("RECONNECTED S%v", (leader+1) % servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -378,8 +378,11 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	// repair
 	cfg.connect((leader + 1) % servers)
+	DPrintf("RECONNECTED %v", (leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
+	DPrintf("RECONNECTED %v", (leader + 2) % servers)
 	cfg.connect((leader + 3) % servers)
+	DPrintf("RECONNECTED %v", (leader + 3) % servers)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.

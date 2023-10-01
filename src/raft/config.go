@@ -489,7 +489,14 @@ func (cfg *config) checkNoLeader() {
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
+	fmt.Printf("logs len:")
+	for i := 0; i < len(cfg.logs); i++ {
+		fmt.Printf(" %v", len(cfg.logs[i]))
+	}
+	fmt.Printf("\n")
+	// fmt.Printf("logs len: %v %v %v\n", len(cfg.logs[0]), len(cfg.logs[1]), len(cfg.logs[2]))
 	for i := 0; i < len(cfg.rafts); i++ {
+		
 		if cfg.applyErr[i] != "" {
 			cfg.t.Fatal(cfg.applyErr[i])
 		}
@@ -499,6 +506,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Unlock()
 
 		if ok {
+			// fmt.Printf("OK!\n")
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
 					index, cmd, cmd1)
@@ -585,12 +593,13 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				// fmt.Printf("index:%v\n", index)
-				// fmt.Printf("nd:%v   expectedServers:%v\n", nd, expectedServers)
-				// fmt.Printf("cmd1:%v   cmd:%v\n", cmd1, cmd)
+				fmt.Printf("index:%v\n", index)
+				fmt.Printf("nd:%v   expectedServers:%v\n", nd, expectedServers)
+				fmt.Printf("cmd1:%v   cmd:%v\n", cmd1, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
+						fmt.Printf("one() SUCCESS\n")
 						// and it was the command we submitted.
 						return index
 					}
