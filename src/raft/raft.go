@@ -504,30 +504,24 @@ func (rf *Raft) updateCommitIndex() {
 	// duplicated on e.g. 2/5 peer forms 
 	// majority when including leader
 	majority := int(len(rf.peers) / 2)
-	N := rf.commitIndex + 1
-	if N > len(rf.log) + 1 {
+	if rf.commitIndex + 1 > len(rf.log) + 1 {
 		return
 	}
 	maxN := rf.commitIndex
-	for N < len(rf.log) + 1 {
+	for N := len(rf.log); N >= rf.commitIndex + 1; N-- {
 		count := 0
 		for iPeer := 0; iPeer < len(rf.peers); iPeer ++ {
 			if rf.matchIndex[iPeer] >= N {
 				count ++
 			}
 		}
-		// if N == 4 {
-			fmt.Printf("No. peers with IDX >= %v: %v, majority:%v, Nth log term:%v, my term:%v\n", N, count, majority, rf.accessLog(N).Term, rf.term)
-		// }
+		DPrintf("No. peers with IDX >= %v: %v, majority:%v, Nth log term:%v, my term:%v\n", 
+					N, count, majority, rf.accessLog(N).Term, rf.term)
 		if count >= majority && rf.accessLog(N).Term == rf.term {
-			if N == 6 {
-				fmt.Printf("count exceeds majority\n")
-			}
+			DPrintf("count exceeds majority\n")
 			maxN = N
-			N ++
-		} else {
 			break
-		}
+		} 
 	}
 	if rf.commitIndex != maxN {
 		rf.commitIndex = maxN
