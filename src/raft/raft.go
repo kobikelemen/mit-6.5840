@@ -104,6 +104,14 @@ func (rf *Raft) printLog() {
 }
 
 
+func (rf *Raft) popLog() {
+	if len(rf.log) == 0 {
+		return
+	}
+	rf.log = rf.log[:len(rf.log)-1]
+}
+
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -359,7 +367,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} 
 
 	if len(args.Entries) != 0 {
-		// TODO: num 3 from Figure 2
 		DPrintf("S%v, APPEND ENTR, appending NEW ENTRIES", rf.me)
 		rf.appendNewEntries(args.Entries)
 		rf.printLog()
@@ -401,17 +408,29 @@ func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd,
 
 func (rf *Raft) appendNewEntries(newEntries []LogEntry) {
 	for i := 0; i < len(newEntries); i ++ {
-		if !rf.checkInLog(newEntries[i]) {
-			rf.log = append(rf.log, newEntries[i])
-		}
+		if rf.checkLogConflict(newEntries[i]) {
+			rf.removeConflictingLogs(newEntries[i].Index)
+		} 
+		rf.log = append(rf.log, newEntries[i])
 	}
 }
 
 
-func (rf *Raft) checkInLog(entry LogEntry) bool {
-	// TODO: currently assumes all new entries are not 
-	//		 not in my log (not generally true)
+func (rf *Raft) checkLogConflict(newEntry LogEntry) bool {
+	if (newEntry.Index > len(rf.log)) {
+		return false
+	}
+	if (rf.accessLog(newEntry.Index).Term != newEntry.Term) {
+		return true
+	}
 	return false
+}
+
+
+func (rf *Raft) removeConflictingLogs(index int) {
+	for len(rf.log) >= index {
+		rf.popLog()
+	}
 }
 
 
@@ -459,8 +478,8 @@ func (rf *Raft) broadcastAppendEntries() {
 						return
 					}
 					rf.mu.Lock()
-					// step down as leader if peer has higher term
 					if !reply.Success && reply.FailReason == 1 {
+						// step down as leader if peer has higher term
 						rf.updateTerm(reply.Term)
 						rf.state = 0
 						DPrintf("S%v, APPEND ENTR to: %v REJECTED, peer T%v > my T%v, becoming follower ", 
