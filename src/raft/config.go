@@ -312,7 +312,6 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	}
 
 	cfg.mu.Unlock()
-
 	applyCh := make(chan ApplyMsg)
 
 	rf := Make(ends, i, cfg.saved[i], applyCh)
@@ -593,9 +592,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				fmt.Printf("index:%v\n", index)
-				fmt.Printf("nd:%v   expectedServers:%v\n", nd, expectedServers)
-				fmt.Printf("cmd1:%v   cmd:%v\n", cmd1, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

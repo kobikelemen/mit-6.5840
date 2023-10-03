@@ -18,16 +18,15 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
-	"fmt"
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -109,6 +108,13 @@ func (rf *Raft) popLog() {
 		return
 	}
 	rf.log = rf.log[:len(rf.log)-1]
+	rf.persist()
+}
+
+
+func (rf *Raft) appendLog(logEntry LogEntry) {
+	rf.log = append(rf.log, logEntry)
+	rf.persist()
 }
 
 
@@ -136,35 +142,48 @@ func (rf *Raft) GetMyState() int {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	DPrintf("S%v, PERSISTING STATE, T:%v votedFor:%v", 
+				rf.me, rf.term, rf.votedFor)
+	rf.printLog()
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(rf.term)
+	encoder.Encode(rf.votedFor)
+	encoder.Encode(rf.log)
+	DPrintf("S%v, bytes buffer len:%v", rf.me, w.Len())
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("S%v, ATTEMPING RESTORING STATE, data len:%v", rf.me, len(data))
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var votedFor int
+	var log []LogEntry = make([]LogEntry, 0)
+	if d.Decode(&term) != nil ||
+	   d.Decode(&votedFor) != nil ||
+	   d.Decode(&log) != nil {
+		DPrintf("S%v, FAILED TO RESTORE PREVIOUS STATE", rf.me)
+		return
+	} else {
+		rf.term = term
+		rf.votedFor = votedFor
+		for i := 0; i < len(log); i ++ {
+			rf.appendLog(log[i])
+		}
+		DPrintf("S%v, SUCCESFULLY RESTORED STATE, T:%v votedFor:%v, log len:%v",
+					rf.me, rf.term, rf.votedFor, len(log))
+		rf.printLog()
+	}
 }
 
 
@@ -230,6 +249,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 																	args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
 		return
 	}
@@ -411,7 +431,7 @@ func (rf *Raft) appendNewEntries(newEntries []LogEntry) {
 		if rf.checkLogConflict(newEntries[i]) {
 			rf.removeConflictingLogs(newEntries[i].Index)
 		} 
-		rf.log = append(rf.log, newEntries[i])
+		rf.appendLog(newEntries[i])
 	}
 }
 
@@ -571,9 +591,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		DPrintf("S%v, Start(), command:%v", rf.me, command)
 		index = len(rf.log) + 1
-		rf.log = append(rf.log, LogEntry{Command : command, 
-										 Term : rf.term, 
-										 Index : index})
+		rf.appendLog(LogEntry{Command : command, 
+							  Term : rf.term, 
+							  Index : index})
 		DPrintf("S%v, APPEND LOG, T:%v, IDX:%v", rf.me, rf.term, index)
 		rf.mu.Lock()
 		rf.printLog()
@@ -604,8 +624,9 @@ func (rf *Raft) getRequestVoteArgs() RequestVoteArgs {
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	rf.term ++
+	rf.updateTerm(rf.term + 1)
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.state = 1
 	votes := 1 // vote for myself
 	DPrintf("S%v, started ELECTION, for term: %v", rf.me, rf.term)
@@ -740,6 +761,7 @@ func (rf *Raft) ticker() {
 func (rf *Raft) updateTerm(newTerm int) {
 	rf.term = newTerm
 	rf.votedFor = -1
+	rf.persist()
 }
 
 
@@ -769,7 +791,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.heartbeat = false
 	rf.state = 0
-	rf.updateTerm(0)
+	rf.term = 0
+	rf.votedFor = -1
 	rf.electionTimeoutMin = 600
 	rf.electionTimeoutRange = 300
 	rf.heartbeatTime = 125

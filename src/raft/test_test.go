@@ -750,12 +750,16 @@ func TestPersist12C(t *testing.T) {
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
+		DPrintf("RESTARTING %v", i)
 		cfg.start1(i, cfg.applier)
 	}
 	for i := 0; i < servers; i++ {
+		DPrintf("DISCONNECTING %v", i)
 		cfg.disconnect(i)
+		DPrintf("RECONNECTING %v", i)
 		cfg.connect(i)
 	}
+	
 
 	cfg.one(12, servers, true)
 
