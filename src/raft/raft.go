@@ -227,17 +227,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 
 	// reject request if my term is ahead 
-	DPrintf("S%v, vote request from: %v, for term: %v", rf.me, args.CandidateId, args.Term)
+	DPrintf("S%v, vote request from: %v, for term: %v", 
+			rf.me, args.CandidateId, args.Term)
 	if args.Term < rf.term {
-		DPrintf("S%v, vote request from: %v REJECTED, lower term", rf.me, args.CandidateId)
+		DPrintf("S%v, vote request from: %v REJECTED, lower term", 
+				rf.me, args.CandidateId)
 		return
 	}
 	// i have already won the election
 	if args.Term == rf.term && rf.state == 2 {
-		DPrintf("S%v, vote request from: %v REJECTED, I won already", rf.me, args.CandidateId)
+		DPrintf("S%v, vote request from: %v REJECTED, I won already", 
+				rf.me, args.CandidateId)
 		return
 	}
-
+	
 	// become follower and update term if my term is behind
 	if args.Term > rf.term {
 		rf.state = 0
@@ -245,15 +248,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("S%v, T->%v, becoming follower", rf.me, args.Term)
 	}
 
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isCandUpToDate(
-																	args.LastLogIndex, args.LastLogTerm) {
+	if !rf.isCandUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		DPrintf("S%v, vote request from:%v REJECTED, candidate NOT up-to-date", 
+				rf.me, args.CandidateId)
+		return
+	}
+
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.persist()
-		DPrintf("S%v, vote request from: %v GRANTED", rf.me, args.CandidateId)
+		DPrintf("S%v, vote request from: %v GRANTED", 
+				rf.me, args.CandidateId)
 		return
 	}
-	DPrintf("S%v, vote request from: %v REJECTED, already voted", rf.me, args.CandidateId)
+	DPrintf("S%v, vote request from: %v REJECTED, already voted", 
+			rf.me, args.CandidateId)
 }
 
 
@@ -262,7 +272,9 @@ func (rf *Raft) isCandUpToDate(candLastLogIndex, candLastLogTerm int) bool {
 	if len(rf.log) > 0 {
 		lastLogTerm = rf.accessLog(len(rf.log)).Term
 	}
-	if candLastLogTerm != rf.term {
+	DPrintf("S%v, isCandUpToDate(), cand T:%v cand I:%v my T:%v my I:%v", 
+			rf.me, candLastLogTerm, candLastLogIndex, lastLogTerm, len(rf.log))
+	if candLastLogTerm != lastLogTerm {
 		return candLastLogTerm >= lastLogTerm
 	}
 	return candLastLogIndex >= len(rf.log)
@@ -326,7 +338,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) sendApplyMsg(prevCommitIndex, commitIndex int) {
 	for i := prevCommitIndex + 1; i <= commitIndex; i ++ {
 		logEntry := rf.accessLog(i)
-		applyMsg := ApplyMsg{
+		applyMsg := ApplyMsg {
 			CommandValid : true,
 			Command : logEntry.Command,
 			CommandIndex : logEntry.Index,
@@ -760,6 +772,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) updateTerm(newTerm int) {
 	rf.term = newTerm
+	DPrintf("S%v, T->%v", rf.me, rf.term)
 	rf.votedFor = -1
 	rf.persist()
 }
