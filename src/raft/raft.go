@@ -73,6 +73,10 @@ type Raft struct {
 	matchIndex 			 []int
 	log 				 []LogEntry
 
+	snapshotLogLen 		 int
+	snapshotTerm		 int
+	snapshotIndex		 int
+
 
 }
 
@@ -85,21 +89,41 @@ type LogEntry struct {
 
 // IMPORTANT: first index is 1
 func (rf *Raft) accessLog(index int) *LogEntry {
-	 if index == 0 || index > len(rf.log) {
+	DPrintf("S%v, acessLog(), snapshotLogLen:%v, index:%v, logLen:%v", 
+			rf.me, rf.snapshotLogLen, index, rf.lenLog())
+	 if index == 0 || index > rf.lenLog() || rf.snapshotLogLen > index -  1 {
+		DPrintf("S%v, returning nil", rf.me)
 		return nil
 	 }
-	 return &rf.log[index-1]
+	 return &rf.log[index - 1 - rf.snapshotLogLen]
+}
+
+
+func (rf *Raft) accessLogTerm(index int) int {
+	if index == 0 || index > rf.lenLog() {
+		return -1
+	}
+	if index == rf.snapshotLogLen {
+		return rf.snapshotTerm
+	}
+	return rf.accessLog(index).Term
 }
 
 
 func (rf *Raft) printLog() {
 	DPrintf("S%v, LOG:", rf.me)
 	fmt.Printf("			")
-	for i := 1; i <= len(rf.log); i ++ {
+	for i := rf.snapshotLogLen + 1; i <= rf.lenLog(); i ++ {
 		logEntry := rf.accessLog(i)
-		fmt.Printf("IDX:%v T:%v CMD:%v   ", logEntry.Index, logEntry.Term, logEntry.Command)
+		fmt.Printf("IDX:%v T:%v CMD:%v   ", 
+				logEntry.Index, logEntry.Term, logEntry.Command)
 	}
 	fmt.Printf("\n")
+}
+
+
+func (rf *Raft) lenLog() int {
+	return len(rf.log) + rf.snapshotLogLen
 }
 
 
@@ -192,8 +216,13 @@ func (rf *Raft) readPersist(data []byte) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
+	DPrintf("S%v, Snapshot(), index:%v", rf.me, index)
+	rf.snapshotIndex = index
+	rf.snapshotTerm = rf.accessLogTerm(index)
+	reduceBy := index - rf.snapshotLogLen
+	rf.snapshotLogLen += index
+	rf.log = rf.log[reduceBy:]
+	rf.snapshotLogLen = index
 }
 
 
@@ -269,15 +298,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) isCandUpToDate(candLastLogIndex, candLastLogTerm int) bool {
 	lastLogTerm := 0
-	if len(rf.log) > 0 {
-		lastLogTerm = rf.accessLog(len(rf.log)).Term
+	if rf.lenLog() > 0 {
+		lastLogTerm = rf.accessLogTerm(rf.lenLog())
 	}
 	DPrintf("S%v, isCandUpToDate(), cand T:%v cand I:%v my T:%v my I:%v", 
-			rf.me, candLastLogTerm, candLastLogIndex, lastLogTerm, len(rf.log))
+			rf.me, candLastLogTerm, candLastLogIndex, lastLogTerm, rf.lenLog())
 	if candLastLogTerm != lastLogTerm {
 		return candLastLogTerm >= lastLogTerm
 	}
-	return candLastLogIndex >= len(rf.log)
+	return candLastLogIndex >= rf.lenLog()
 }
 
 
@@ -382,19 +411,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if args.PrevLogIndex > len(rf.log) {
+	if args.PrevLogIndex > rf.lenLog() {
 		reply.Success = false
 		reply.FailReason = 2
 		reply.Term = rf.term
 		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v", 
 				rf.me, args.PrevLogIndex, args.PrevLogTerm)
 		return
-	} else if args.PrevLogIndex != 0 && rf.accessLog(args.PrevLogIndex).Term != args.PrevLogTerm {
+	} else if args.PrevLogIndex != 0 && rf.accessLogTerm(args.PrevLogIndex) != args.PrevLogTerm {
 		reply.Success = false
 		reply.FailReason = 2
 		reply.Term = rf.term
 		DPrintf("S%v, REJECTED APPEND ENTR: prev log DOESN'T MATCH, prevLogIndex: %v, prevLogTerm:%v, T at prevLogIndex:%v", 
-				rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLog(args.PrevLogIndex).Term)
+				rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.accessLogTerm(args.PrevLogIndex))
 		return
 	} 
 
@@ -429,7 +458,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //    is greater than my tern num, step down as leader
 func (rf *Raft) sendAppendEntries(me, iPeer int, targetPeer *labrpc.ClientEnd, 
 								args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	DPrintf("S%v, SENDING APPEND ENTR to: %v, len(entries): %v", me, iPeer, len(args.Entries))
+	DPrintf("S%v, SENDING APPEND ENTR to: %v, len(entries): %v", 
+			me, iPeer, len(args.Entries))
 	ok := targetPeer.Call("Raft.AppendEntries", args, reply)
 	if !ok {
 		DPrintf("S%v, APPEND ENTR COUDLN'T REACH: %v", me, iPeer)
@@ -449,10 +479,10 @@ func (rf *Raft) appendNewEntries(newEntries []LogEntry) {
 
 
 func (rf *Raft) checkLogConflict(newEntry LogEntry) bool {
-	if (newEntry.Index > len(rf.log)) {
+	if (newEntry.Index > rf.lenLog()) {
 		return false
 	}
-	if (rf.accessLog(newEntry.Index).Term != newEntry.Term) {
+	if (rf.accessLogTerm(newEntry.Index) != newEntry.Term) {
 		return true
 	}
 	return false
@@ -460,7 +490,7 @@ func (rf *Raft) checkLogConflict(newEntry LogEntry) bool {
 
 
 func (rf *Raft) removeConflictingLogs(index int) {
-	for len(rf.log) >= index {
+	for rf.lenLog() >= index {
 		rf.popLog()
 	}
 }
@@ -468,17 +498,13 @@ func (rf *Raft) removeConflictingLogs(index int) {
 
 func (rf *Raft) getAppendEntriesArgs(iPeer int) AppendEntriesArgs {
 	entries := make([]LogEntry, 0)
-	if len(rf.log) >= rf.nextIndex[iPeer] {
-		for i := rf.nextIndex[iPeer]; i <= len(rf.log); i ++ {
+	if rf.lenLog() >= rf.nextIndex[iPeer] {
+		for i := rf.nextIndex[iPeer]; i <= rf.lenLog(); i ++ {
 			entries = append(entries, *rf.accessLog(i))
 		}
 	}
 	prevLogIndex := rf.nextIndex[iPeer] - 1
-	prevLogEntry := rf.accessLog(prevLogIndex)
-	var prevLogTerm int = 0
-	if prevLogEntry != nil {
-		prevLogTerm = prevLogEntry.Term
-	}
+	prevLogTerm := rf.accessLogTerm(prevLogIndex)
 	args := AppendEntriesArgs{
 		Term : rf.term, 
 		LeaderId : rf.me,
@@ -524,8 +550,8 @@ func (rf *Raft) broadcastAppendEntries() {
 						DPrintf("S%v, APPEND ENTR to: %v REJECTED, log inconsistency, RETRYING", 
 									rf.me, i)
 					} else if reply.Success {
-						nextIndex := len(rf.log) + 1
-						matchIndex := len(rf.log)
+						nextIndex := rf.lenLog() + 1
+						matchIndex := rf.lenLog()
 						rf.nextIndex[i] = nextIndex
 						rf.matchIndex[i] = matchIndex
 						DPrintf("S%v, APPEND ENTR to: %v, SUCCESS, peer next IDX->%v, peer match IDX->%v", 
@@ -555,11 +581,11 @@ func (rf *Raft) updateCommitIndex() {
 	// duplicated on e.g. 2/5 peer forms 
 	// majority when including leader
 	majority := int(len(rf.peers) / 2)
-	if rf.commitIndex + 1 > len(rf.log) + 1 {
+	if rf.commitIndex + 1 > rf.lenLog() + 1 {
 		return
 	}
 	maxN := rf.commitIndex
-	for N := len(rf.log); N >= rf.commitIndex + 1; N-- {
+	for N := rf.lenLog(); N >= rf.commitIndex + 1; N-- {
 		count := 0
 		for iPeer := 0; iPeer < len(rf.peers); iPeer ++ {
 			if rf.matchIndex[iPeer] >= N {
@@ -567,8 +593,8 @@ func (rf *Raft) updateCommitIndex() {
 			}
 		}
 		DPrintf("No. peers with IDX >= %v: %v, majority:%v, Nth log term:%v, my term:%v\n", 
-					N, count, majority, rf.accessLog(N).Term, rf.term)
-		if count >= majority && rf.accessLog(N).Term == rf.term {
+					N, count, majority, rf.accessLogTerm(N), rf.term)
+		if count >= majority && rf.accessLogTerm(N) == rf.term {
 			DPrintf("count exceeds majority\n")
 			maxN = N
 			break
@@ -602,7 +628,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	if isLeader {
 		DPrintf("S%v, Start(), command:%v", rf.me, command)
-		index = len(rf.log) + 1
+		index = rf.lenLog() + 1
 		rf.appendLog(LogEntry{Command : command, 
 							  Term : rf.term, 
 							  Index : index})
@@ -618,7 +644,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) getRequestVoteArgs() RequestVoteArgs {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	lastLogEntry := rf.accessLog(len(rf.log))
+	lastLogEntry := rf.accessLog(rf.lenLog())
 	vreqArgs := RequestVoteArgs{
 		Term: rf.term, 
 		CandidateId: rf.me,
@@ -783,7 +809,7 @@ func (rf *Raft) initIndexState() {
 	rf.nextIndex = nil
 	for i := 0; i < len(rf.peers); i++ {
 		rf.matchIndex = append(rf.matchIndex, 0)
-		rf.nextIndex = append(rf.nextIndex, len(rf.log) + 1)
+		rf.nextIndex = append(rf.nextIndex, rf.lenLog() + 1)
 	}
 }
 
@@ -815,6 +841,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, 0)
 	rf.log = make([]LogEntry, 0)
 	rf.applyCh = applyCh
+	rf.snapshotLogLen = 0
+	rf.snapshotIndex = 0
+	rf.snapshotTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

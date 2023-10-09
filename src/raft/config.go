@@ -488,7 +488,7 @@ func (cfg *config) checkNoLeader() {
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
-	fmt.Printf("logs len:")
+	fmt.Printf("logs len returned to applyCh:")
 	for i := 0; i < len(cfg.logs); i++ {
 		fmt.Printf(" %v", len(cfg.logs[i]))
 	}
