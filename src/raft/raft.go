@@ -92,7 +92,7 @@ func (rf *Raft) accessLog(index int) *LogEntry {
 	DPrintf("S%v, acessLog(), snapshotLogLen:%v, index:%v, logLen:%v", 
 			rf.me, rf.snapshotLogLen, index, rf.lenLog())
 	 if index == 0 || index > rf.lenLog() || rf.snapshotLogLen > index -  1 {
-		DPrintf("S%v, returning nil", rf.me)
+		DPrintf("S%v, accessLog returning nil", rf.me)
 		return nil
 	 }
 	 return &rf.log[index - 1 - rf.snapshotLogLen]
@@ -442,9 +442,17 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) sendApplyMsg(prevCommitIndex, commitIndex int, 
 							snapshot []byte) {
-	DPrintf("S%v, sendApplyMsg(), commitIndex:%v", rf.me, commitIndex)
-	for i := prevCommitIndex + 1; i <= commitIndex; i ++ {
+	rf.mu.Lock()
+	DPrintf("S%v, sendApplyMsg(), from IDX:%v to IDX:%v",
+			rf.me, prevCommitIndex+1, commitIndex)
+	start := prevCommitIndex + 1
+	end := commitIndex
+	rf.mu.Unlock()
+	for i := start; i <= end; i ++ {
+		rf.mu.Lock()
 		logEntry := rf.accessLog(i)
+		DPrintf("S%v, accessing log:%v, has IDX:%v", 
+				rf.me, i, logEntry.Index)
 		applyMsg := ApplyMsg {
 			CommandValid : true,
 			Command : logEntry.Command,
@@ -454,6 +462,7 @@ func (rf *Raft) sendApplyMsg(prevCommitIndex, commitIndex int,
 			SnapshotTerm : -1,
 			SnapshotIndex : -1,
 		}
+		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 	}
 }
@@ -577,7 +586,9 @@ func (rf *Raft) appendNewEntries(newEntries []LogEntry) {
 		if rf.checkLogConflict(newEntries[i]) {
 			rf.removeConflictingLogs(newEntries[i].Index)
 		} 
-		rf.appendLog(newEntries[i])
+		if newEntries[i].Index == rf.lenLog() + 1 {
+			rf.appendLog(newEntries[i])
+		}
 	}
 }
 
@@ -733,6 +744,8 @@ func (rf *Raft) updateCommitIndex() {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	isLeader := rf.state == 2
 
