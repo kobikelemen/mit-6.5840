@@ -4,26 +4,32 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
-	"log"
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = false
+const Debug = true
+
+var debugStart time.Time = time.Now()
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
+		time := time.Since(debugStart).Milliseconds()
+		prefix := fmt.Sprintf("%06d %v", time, format)
+		fmt.Printf(prefix + "\n", a...)
 	}
 	return
 }
 
 
+
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Idx		int
+	OpType  string // "Get", "Put", or "Append"
 }
+
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -33,17 +39,139 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
+	
+	db		[]KV
+	opQue	[]Op
+}
 
-	// Your definitions here.
+
+type KV struct {
+	key		string
+	val 	string
+}
+
+
+func (kv *KVServer) isMyOp(idxExp int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if len(kv.opQue) == 0 {
+		return false
+	}
+	return kv.opQue[len(kv.opQue)-1].Idx == idxExp
+}
+
+
+func (kv *KVServer) opQueRmv() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.opQue = kv.opQue[1:]
+}
+
+
+func (kv *KVServer) opQueAdd(op Op) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.opQue = append(kv.opQue, op)
+}
+
+
+func (kv *KVServer) dbGet(key string) string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	for i := 0; i < len(kv.db); i ++ {
+		if kv.db[i].key == key {
+			return kv.db[i].val
+		}
+	}
+	return ""
+}
+
+
+func (kv *KVServer) dbAppend(key, val string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	for i := 0; i < len(kv.db); i ++ {
+		if kv.db[i].key == key {
+			kv.db[i].val = kv.db[i].val + val
+			return
+		}
+	}
+	kv.db = append(kv.db, KV{key : key, val : val})
+}
+
+
+func (kv *KVServer) dbPut(key, val string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	for i := 0; i < len(kv.db); i ++ {
+		if kv.db[i].key == key {
+			kv.db[i].val = val
+			return
+		}
+	}
+	kv.db = append(kv.db, KV{key : key, val : val})
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	DPrintf("S%v, RECV GET, key:%v", kv.me, args.Key)
+	op := Op{OpType : "Get"}
+	idxExp, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		// DPrintf("S%v, not leader, returning", kv.me)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("S%v, GET waiting", kv.me)
+	for !kv.isMyOp(idxExp) {
+		time.Sleep(time.Duration(5) * time.Millisecond)
+	}
+	kv.opQueRmv()
+	reply.Value = kv.dbGet(args.Key)
+	reply.Err = OK
+	DPrintf("S%v, GET returning val:%v", kv.me, reply.Value)
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+
+func (kv *KVServer) PutAppend(args *PutAppendArgs, 
+							reply *PutAppendReply) {
+	if args.Value != "" {
+		DPrintf("S%v, RECV PUTAPPEND, key:%v, val:%v", 
+				kv.me, args.Key, args.Value)
+	}
+	op := Op{OpType : args.Op}
+	idxExp, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		// DPrintf("S%v, not leader, returning", kv.me)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("S%v, PUTAPPEND waiting", kv.me)
+	for !kv.isMyOp(idxExp) {
+		time.Sleep(time.Duration(5) * time.Millisecond)
+	}
+	kv.opQueRmv()
+	reply.Err = OK
+	if args.Op == "Put" {
+		kv.dbPut(args.Key, args.Value)
+	} else if args.Op == "Append" {
+		kv.dbAppend(args.Key, args.Value)
+	}
+}
+
+
+func (kv *KVServer) applyChListen() {
+	for msg := range kv.applyCh {
+		if msg.CommandValid {
+			op, ok := msg.Command.(Op)
+			if !ok {
+				DPrintf("S%v, msg recv from applyCh is wrong type", kv.me)
+				break
+			}
+			op.Idx = msg.CommandIndex
+			kv.opQueAdd(op)
+		}
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -85,13 +213,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.db = make([]KV, 0)
+	kv.opQue = make([]Op, 0)
 
-	// You may need initialization code here.
+	go kv.applyChListen()
 
 	return kv
 }

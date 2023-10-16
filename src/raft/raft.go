@@ -42,7 +42,6 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 
-	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
@@ -588,6 +587,7 @@ func (rf *Raft) appendNewEntries(newEntries []LogEntry) {
 		} 
 		if newEntries[i].Index == rf.lenLog() + 1 {
 			rf.appendLog(newEntries[i])
+
 		}
 	}
 }
@@ -697,8 +697,6 @@ func (rf *Raft) printPeerIndexes(peerIndexes []int) {
 func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("S%v rf.matchIndex:   ", rf.me)
-	rf.printPeerIndexes(rf.matchIndex)
 	// duplicated on e.g. 2/5 peer forms 
 	// majority when including leader
 	majority := int(len(rf.peers) / 2)

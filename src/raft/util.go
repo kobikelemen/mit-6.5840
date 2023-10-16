@@ -5,7 +5,7 @@ import "time"
 import "fmt"
 
 // Debugging
-const Debug = true
+const Debug = false
 
 var debugStart time.Time = time.Now()
 
