@@ -35,7 +35,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{Key : key}
+	args := GetArgs{Key : key, OpID : nrand()}
 	reply := GetReply{}
 	for true {
 		DPrintf("C, SENDING GET to:%v", ck.iLeader)
@@ -48,7 +48,7 @@ func (ck *Clerk) Get(key string) string {
 			DPrintf("C, OK from:%v reply:%v", ck.iLeader, reply.Value)
 			return reply.Value
 		} else if reply.Err == ErrWrongLeader {
-			// DPrintf("C, wrong leader, retrying")
+			DPrintf("C, wrong leader, retrying")
 			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 		}
 	}
@@ -64,7 +64,7 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{Key : key, Value : value, Op : op}
+	args := PutAppendArgs{Key : key, Value : value, Op : op, OpID : nrand()}
 	reply := PutAppendReply{}
 	for true {
 		if value != "" {
@@ -79,7 +79,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			DPrintf("C, OK from:%v", ck.iLeader)
 			return
 		} else if reply.Err == ErrWrongLeader {
-			// DPrintf("C, wrong leader, retrying")
+			DPrintf("C, %v wrong leader, retrying", ck.iLeader + 1)
 			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 		}
 	}

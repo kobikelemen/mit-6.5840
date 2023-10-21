@@ -195,6 +195,15 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 				}
 			}
 		}
+		DPrintf("PARTITIONING INTO TWO GROUPS:")
+		for i := 0; i < len(pa[0]); i ++ {
+			fmt.Printf("%v ", pa[0][i])
+		}
+		fmt.Printf("\n")
+		for i := 0; i < len(pa[1]); i ++ {
+			fmt.Printf("%v ", pa[1][i])
+		}
+		fmt.Printf("\n")
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
@@ -313,6 +322,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term
 			// has started.
+			DPrintf("PARTITION HEALED")
 			cfg.ConnectAll()
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)

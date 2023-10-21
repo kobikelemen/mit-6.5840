@@ -27,21 +27,24 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 type Op struct {
 	Idx		int
+	Term	int
 	OpType  string // "Get", "Put", or "Append"
+	ID 		int64
 }
 
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	mu      	 sync.Mutex
+	me      	 int
+	rf      	 *raft.Raft
+	applyCh 	 chan raft.ApplyMsg
+	dead    	 int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
 	
-	db		[]KV
-	opQue	[]Op
+	db			 []KV
+	opQue		 []Op
+	opSubmitted  map[int64]Op
 }
 
 
@@ -72,6 +75,13 @@ func (kv *KVServer) opQueAdd(op Op) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	kv.opQue = append(kv.opQue, op)
+}
+
+
+func (kv *KVServer) opQueLen() int {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return len(kv.opQue)
 }
 
 
@@ -114,19 +124,42 @@ func (kv *KVServer) dbPut(key, val string) {
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	DPrintf("S%v, RECV GET, key:%v", kv.me, args.Key)
-	op := Op{OpType : "Get"}
-	idxExp, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		// DPrintf("S%v, not leader, returning", kv.me)
-		reply.Err = ErrWrongLeader
-		return
+	DPrintf("S%v, RECV GET, key:%v, opID:%v", kv.me, args.Key, args.OpID)
+	op, ok := kv.opSubmitted[args.OpID]
+	var idxExp int
+	if !ok {
+		DPrintf("S%v, OpID not seen before, submitting to raft", kv.me)
+		op.OpType = "Get"
+		op.ID = args.OpID
+		var term int
+		var isLeader bool
+		idxExp, term, isLeader = kv.rf.Start(op)
+		op.Term = term
+		if !isLeader {
+			delete(kv.opSubmitted, args.OpID)
+			reply.Err = ErrWrongLeader
+			return
+		} else {
+			kv.opSubmitted[op.ID] = op
+		}
+	} else {
+		DPrintf("S%v, OpID SEEN before", kv.me)
+		idxExp = op.Idx
 	}
 	DPrintf("S%v, GET waiting", kv.me)
 	for !kv.isMyOp(idxExp) {
+		// return if I'm no longer leader
+		raftTerm, isLeader := kv.rf.GetState()
+		if raftTerm != op.Term && !isLeader{
+			DPrintf("S%v, not leader anymore, returning", kv.me)
+			reply.Err = ErrWrongLeader
+			return
+		}
 		time.Sleep(time.Duration(5) * time.Millisecond)
 	}
-	kv.opQueRmv()
+	if kv.opQueLen() > 0 {
+		kv.opQueRmv()
+	}
 	reply.Value = kv.dbGet(args.Key)
 	reply.Err = OK
 	DPrintf("S%v, GET returning val:%v", kv.me, reply.Value)
@@ -135,28 +168,49 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, 
 							reply *PutAppendReply) {
-	if args.Value != "" {
+	// if args.Value != "" {
 		DPrintf("S%v, RECV PUTAPPEND, key:%v, val:%v", 
 				kv.me, args.Key, args.Value)
-	}
-	op := Op{OpType : args.Op}
-	idxExp, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		// DPrintf("S%v, not leader, returning", kv.me)
-		reply.Err = ErrWrongLeader
-		return
+	// }
+	op, ok := kv.opSubmitted[args.OpID]
+	var idxExp int
+	if !ok {
+		DPrintf("S%v, OpID NOT SEEN before, submitting to raft", kv.me)
+		op.OpType = args.Op
+		op.ID = args.OpID
+		var term int
+		var isLeader bool
+		idxExp, term, isLeader = kv.rf.Start(op)
+		op.Term = term
+		if !isLeader {
+			delete(kv.opSubmitted, args.OpID)
+			reply.Err = ErrWrongLeader
+			return
+		} else {
+			kv.opSubmitted[op.ID] = op
+		}
+	} else {
+		DPrintf("S%v, OpID SEEN before", kv.me)
+		idxExp = op.Idx
 	}
 	DPrintf("S%v, PUTAPPEND waiting", kv.me)
 	for !kv.isMyOp(idxExp) {
+		// return if I'm no longer leader
+		raftTerm, isLeader := kv.rf.GetState()
+		if raftTerm != op.Term && !isLeader{
+			DPrintf("S%v, not leader anymore, returning", kv.me)
+			reply.Err = ErrWrongLeader
+			return
+		}
 		time.Sleep(time.Duration(5) * time.Millisecond)
 	}
 	kv.opQueRmv()
-	reply.Err = OK
 	if args.Op == "Put" {
 		kv.dbPut(args.Key, args.Value)
 	} else if args.Op == "Append" {
 		kv.dbAppend(args.Key, args.Value)
 	}
+	reply.Err = OK
 }
 
 
@@ -217,6 +271,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.db = make([]KV, 0)
 	kv.opQue = make([]Op, 0)
+	kv.opSubmitted = make(map[int64]Op)
 
 	go kv.applyChListen()
 
