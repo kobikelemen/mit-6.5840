@@ -25,26 +25,54 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 
 
-type Op struct {
-	Idx		int
-	Term	int
-	OpType  string // "Get", "Put", or "Append"
-	ID 		int64
+type OpEntry struct {
+	Idx			int
+	Term		int
+	OpType  	string // "Get", "Put", or "Append"
+	// ID 			int64
+	Key			string
+	Value 		string
+
+	// client info
+	ClientId	int64
+	SeqNum 		int
 }
 
 
+type DupOpElem struct {
+	seqNum		int
+	res			string
+}
+
+
+func (kv *KVServer) dupOpTableGet(clientId int64) (DupOpElem, bool) {
+	kv.dupOpMu.Lock()
+	dupOpElem, ok := kv.dupOpTable[clientId]
+	kv.dupOpMu.Unlock()
+	return dupOpElem, ok
+}
+
+func (kv *KVServer) dupOpTableSet(clientId int64, dupOpElem DupOpElem) {
+	kv.dupOpMu.Lock()
+	DPrintf("S%v, dupOpTableSET() clientId:%v seqNum:%v", kv.me, clientId, dupOpElem.seqNum)
+	kv.dupOpTable[clientId] = dupOpElem
+	kv.dupOpMu.Unlock()
+}
+
 type KVServer struct {
 	mu      	 sync.Mutex
+	dupOpMu		 sync.Mutex
 	me      	 int
 	rf      	 *raft.Raft
 	applyCh 	 chan raft.ApplyMsg
 	dead    	 int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
-	
+
 	db			 []KV
-	opQue		 []Op
-	opSubmitted  map[int64]Op
+	dupOpTable	 map[int64]DupOpElem // indexed by client Id
+							 		 // indicates if current 
+									 // req is duplicate
 }
 
 
@@ -54,42 +82,15 @@ type KV struct {
 }
 
 
-func (kv *KVServer) isMyOp(idxExp int) bool {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if len(kv.opQue) == 0 {
-		return false
-	}
-	return kv.opQue[len(kv.opQue)-1].Idx == idxExp
-}
-
-
-func (kv *KVServer) opQueRmv() {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.opQue = kv.opQue[1:]
-}
-
-
-func (kv *KVServer) opQueAdd(op Op) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.opQue = append(kv.opQue, op)
-}
-
-
-func (kv *KVServer) opQueLen() int {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	return len(kv.opQue)
-}
-
-
 func (kv *KVServer) dbGet(key string) string {
+	DPrintf("S%v, dbGet() waiting for lock", kv.me)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	DPrintf("S%v, dbGet(), key:%v", kv.me, key)
 	for i := 0; i < len(kv.db); i ++ {
 		if kv.db[i].key == key {
+			DPrintf("S%v, dbGet(), returning val:%v", 
+						kv.me, kv.db[i].val)
 			return kv.db[i].val
 		}
 	}
@@ -98,8 +99,11 @@ func (kv *KVServer) dbGet(key string) string {
 
 
 func (kv *KVServer) dbAppend(key, val string) {
+	DPrintf("S%v, dbAppend() waiting for lock", kv.me)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	DPrintf("S%v, dbAppend(), key:%v, val%v", 
+					kv.me, key, val)
 	for i := 0; i < len(kv.db); i ++ {
 		if kv.db[i].key == key {
 			kv.db[i].val = kv.db[i].val + val
@@ -111,8 +115,11 @@ func (kv *KVServer) dbAppend(key, val string) {
 
 
 func (kv *KVServer) dbPut(key, val string) {
+	DPrintf("S%v, dbPut() waiting for lock", kv.me)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	DPrintf("S%v, dbPut(), key:%v, val%v", 
+					kv.me, key, val)
 	for i := 0; i < len(kv.db); i ++ {
 		if kv.db[i].key == key {
 			kv.db[i].val = val
@@ -123,107 +130,112 @@ func (kv *KVServer) dbPut(key, val string) {
 }
 
 
+
+
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	DPrintf("S%v, RECV GET, key:%v, opID:%v", kv.me, args.Key, args.OpID)
-	op, ok := kv.opSubmitted[args.OpID]
-	var idxExp int
+	DPrintf("S%v, RECV GET, key:%v", kv.me, args.Key)
+	dupOpElem, ok := kv.dupOpTableGet(args.ClientId)
 	if !ok {
-		DPrintf("S%v, OpID not seen before, submitting to raft", kv.me)
-		op.OpType = "Get"
-		op.ID = args.OpID
-		var term int
-		var isLeader bool
-		idxExp, term, isLeader = kv.rf.Start(op)
-		op.Term = term
+		// first request from client
+		DPrintf("S%v, first request from C:%v", kv.me, args.ClientId)
+		kv.dupOpTableSet(args.ClientId, DupOpElem{-1, ""})	
+		dupOpElem.seqNum = -1
+	}
+	if dupOpElem.seqNum != args.SeqNum {
+		op := OpEntry{OpType: "Get", 
+					  Key: args.Key,
+					  ClientId: args.ClientId, 
+					  SeqNum: args.SeqNum}
+		DPrintf("S%v, submitting to raft", kv.me)
+		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
-			delete(kv.opSubmitted, args.OpID)
+			DPrintf("S%v,  wrong leader", kv.me)
 			reply.Err = ErrWrongLeader
 			return
 		} else {
-			kv.opSubmitted[op.ID] = op
+			// wait for applyCh
+			DPrintf("S%v, waiting for applyCh", kv.me)
+			dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			for dupOpElem.seqNum != args.SeqNum {
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			}
 		}
 	} else {
-		DPrintf("S%v, OpID SEEN before", kv.me)
-		idxExp = op.Idx
+		DPrintf("S%v, DUPLICATE req", kv.me)
 	}
-	DPrintf("S%v, GET waiting", kv.me)
-	for !kv.isMyOp(idxExp) {
-		// return if I'm no longer leader
-		raftTerm, isLeader := kv.rf.GetState()
-		if raftTerm != op.Term && !isLeader{
-			DPrintf("S%v, not leader anymore, returning", kv.me)
-			reply.Err = ErrWrongLeader
-			return
-		}
-		time.Sleep(time.Duration(5) * time.Millisecond)
-	}
-	if kv.opQueLen() > 0 {
-		kv.opQueRmv()
-	}
-	reply.Value = kv.dbGet(args.Key)
+	DPrintf("S%v, SUCCESS", kv.me)
+	reply.Value = dupOpElem.res
 	reply.Err = OK
-	DPrintf("S%v, GET returning val:%v", kv.me, reply.Value)
 }
+
 
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, 
 							reply *PutAppendReply) {
-	// if args.Value != "" {
-		DPrintf("S%v, RECV PUTAPPEND, key:%v, val:%v", 
-				kv.me, args.Key, args.Value)
-	// }
-	op, ok := kv.opSubmitted[args.OpID]
-	var idxExp int
+	DPrintf("S%v, RECV PUTAPPEND, key:%v, val:%v", kv.me, args.Key, args.Value)
+	dupOpElem, ok := kv.dupOpTableGet(args.ClientId)
 	if !ok {
-		DPrintf("S%v, OpID NOT SEEN before, submitting to raft", kv.me)
-		op.OpType = args.Op
-		op.ID = args.OpID
-		var term int
-		var isLeader bool
-		idxExp, term, isLeader = kv.rf.Start(op)
-		op.Term = term
+		// first request from client
+		DPrintf("S%v, first request from C:%v", kv.me, args.ClientId)
+		kv.dupOpTableSet(args.ClientId, DupOpElem{-1, ""})
+		dupOpElem.seqNum = -1
+	}
+	if dupOpElem.seqNum != args.SeqNum {
+		op := OpEntry{OpType: args.Op,
+					  Key: args.Key,
+					  Value: args.Value,
+					  ClientId: args.ClientId, 
+					  SeqNum: args.SeqNum}
+		DPrintf("S%v, submitting to raft", kv.me)
+		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
-			delete(kv.opSubmitted, args.OpID)
+			DPrintf("S%v,  wrong leader", kv.me)
 			reply.Err = ErrWrongLeader
 			return
 		} else {
-			kv.opSubmitted[op.ID] = op
+			// wait for applyCh
+			DPrintf("S%v, waiting for applyCh", kv.me)
+			dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			for dupOpElem.seqNum != args.SeqNum {
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			}
 		}
 	} else {
-		DPrintf("S%v, OpID SEEN before", kv.me)
-		idxExp = op.Idx
+		DPrintf("S%v, DUPLICATE req", kv.me)
 	}
-	DPrintf("S%v, PUTAPPEND waiting", kv.me)
-	for !kv.isMyOp(idxExp) {
-		// return if I'm no longer leader
-		raftTerm, isLeader := kv.rf.GetState()
-		if raftTerm != op.Term && !isLeader{
-			DPrintf("S%v, not leader anymore, returning", kv.me)
-			reply.Err = ErrWrongLeader
-			return
-		}
-		time.Sleep(time.Duration(5) * time.Millisecond)
-	}
-	kv.opQueRmv()
-	if args.Op == "Put" {
-		kv.dbPut(args.Key, args.Value)
-	} else if args.Op == "Append" {
-		kv.dbAppend(args.Key, args.Value)
-	}
+	DPrintf("S%v, SUCCESS", kv.me)
 	reply.Err = OK
 }
 
 
 func (kv *KVServer) applyChListen() {
 	for msg := range kv.applyCh {
+		DPrintf("S%v, msg recv from applyCh", kv.me)
 		if msg.CommandValid {
-			op, ok := msg.Command.(Op)
+			opEntry, ok := msg.Command.(OpEntry)
 			if !ok {
 				DPrintf("S%v, msg recv from applyCh is wrong type", kv.me)
 				break
 			}
-			op.Idx = msg.CommandIndex
-			kv.opQueAdd(op)
+			if opEntry.OpType == "Get" {
+				DPrintf("S%v, applyChListen Get", kv.me)
+				res := kv.dbGet(opEntry.Key)
+				kv.dupOpTableSet(opEntry.ClientId, 
+					DupOpElem{seqNum: opEntry.SeqNum, res: res})
+			} else if opEntry.OpType == "Put" {
+				DPrintf("S%v, applyChListen Put", kv.me)
+				kv.dbPut(opEntry.Key, opEntry.Value)
+				kv.dupOpTableSet(opEntry.ClientId, 
+					DupOpElem{seqNum: opEntry.SeqNum}) 
+			} else if opEntry.OpType == "Append" {
+				DPrintf("S%v, applyChListen Append", kv.me)
+				kv.dbAppend(opEntry.Key, opEntry.Value)
+				kv.dupOpTableSet(opEntry.ClientId, 
+					DupOpElem{seqNum: opEntry.SeqNum}) 
+			}
 		}
 	}
 }
@@ -262,7 +274,7 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(OpEntry{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -270,8 +282,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.db = make([]KV, 0)
-	kv.opQue = make([]Op, 0)
-	kv.opSubmitted = make(map[int64]Op)
+	// kv.opQue = make([]OpEntry, 0)
+	kv.dupOpTable = make(map[int64]DupOpElem)
 
 	go kv.applyChListen()
 

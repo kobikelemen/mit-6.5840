@@ -6,8 +6,10 @@ import "math/big"
 
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	iLeader int
+	servers  []*labrpc.ClientEnd
+	iLeader  int
+	clientId int64
+	seqNum	 int
 }
 
 func nrand() int64 {
@@ -21,6 +23,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.iLeader = 0
+	ck.clientId = nrand()
+	ck.seqNum = 0
 	return ck
 }
 
@@ -35,20 +39,25 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{Key : key, OpID : nrand()}
+	args := GetArgs{Key: key, 
+					ClientId: ck.clientId, 
+					SeqNum: ck.seqNum}
 	reply := GetReply{}
+	ck.seqNum ++
 	for true {
-		DPrintf("C, SENDING GET to:%v", ck.iLeader)
+		DPrintf("C%v, SENDING GET to:%v, key:%v, seqNum:%v", 
+				ck.clientId, ck.iLeader +1, key, ck.seqNum)
 		ok := ck.servers[ck.iLeader].Call("KVServer.Get", &args, &reply)
 		if !ok {
-			DPrintf("C, GET COULDN'T REACH:%v", ck.iLeader)
+			DPrintf("C%v, GET COULDN'T REACH:%v", ck.clientId, ck.iLeader +1)
+			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 			continue
 		}
 		if reply.Err == OK {
-			DPrintf("C, OK from:%v reply:%v", ck.iLeader, reply.Value)
+			DPrintf("C%v, OK from:%v reply:%v", ck.clientId, ck.iLeader +1, reply.Value)
 			return reply.Value
 		} else if reply.Err == ErrWrongLeader {
-			DPrintf("C, wrong leader, retrying")
+			DPrintf("C%v, wrong leader, retrying", ck.clientId)
 			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 		}
 	}
@@ -64,22 +73,29 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{Key : key, Value : value, Op : op, OpID : nrand()}
+	args := PutAppendArgs{Key : key, 
+						  Value : value, 
+						  Op : op, ClientId: 
+						  ck.clientId, 
+						  SeqNum: ck.seqNum}
 	reply := PutAppendReply{}
+	ck.seqNum ++
 	for true {
 		if value != "" {
-			DPrintf("C, SENDING PUTAPPEND to:%v, key:%v, val:%v", ck.iLeader, key, value)
+			DPrintf("C%v, SENDING PUTAPPEND to:%v, key:%v, val:%v, seqNum:%v", 
+						ck.clientId, ck.iLeader +1, key, value, ck.seqNum)
 		}
 		ok := ck.servers[ck.iLeader].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
-			DPrintf("C, GET COULDN'T REACH:%v", ck.iLeader)
+			DPrintf("C%v, GET COULDN'T REACH:%v", ck.clientId, ck.iLeader +1)
+			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 			continue
 		}
 		if reply.Err == OK {
-			DPrintf("C, OK from:%v", ck.iLeader)
+			DPrintf("C%v, OK from:%v", ck.clientId, ck.iLeader +1)
 			return
 		} else if reply.Err == ErrWrongLeader {
-			DPrintf("C, %v wrong leader, retrying", ck.iLeader + 1)
+			DPrintf("C%v, %v wrong leader, retrying", ck.clientId, ck.iLeader + 1)
 			ck.iLeader = (ck.iLeader + 1) % len(ck.servers)
 		}
 	}
