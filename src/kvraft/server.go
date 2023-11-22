@@ -155,11 +155,19 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		} else {
 			// wait for applyCh
+			// startedWait := time.Now()
 			DPrintf("S%v, waiting for applyCh", kv.me)
 			dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
 			for dupOpElem.seqNum != args.SeqNum {
 				time.Sleep(time.Duration(10) * time.Millisecond)
 				dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+				// if time.Since(startedWait) > time.Duration(1000) * time.Millisecond {
+				// 	DPrintf("S%v,  wrong leader", kv.me)
+				// 	reply.Err = ErrWrongLeader
+				// 	return
+				// }
+
+
 			}
 		}
 	} else {
@@ -221,17 +229,20 @@ func (kv *KVServer) applyChListen() {
 				break
 			}
 			if opEntry.OpType == "Get" {
-				DPrintf("S%v, applyChListen Get", kv.me)
+				DPrintf("S%v, applyChListen Get, k:%v", 
+						kv.me, opEntry.Key)
 				res := kv.dbGet(opEntry.Key)
 				kv.dupOpTableSet(opEntry.ClientId, 
 					DupOpElem{seqNum: opEntry.SeqNum, res: res})
 			} else if opEntry.OpType == "Put" {
-				DPrintf("S%v, applyChListen Put", kv.me)
+				DPrintf("S%v, applyChListen Put, k:%v, v:%v", 
+						kv.me, opEntry.Key, opEntry.Value)
 				kv.dbPut(opEntry.Key, opEntry.Value)
 				kv.dupOpTableSet(opEntry.ClientId, 
 					DupOpElem{seqNum: opEntry.SeqNum}) 
 			} else if opEntry.OpType == "Append" {
-				DPrintf("S%v, applyChListen Append", kv.me)
+				DPrintf("S%v, applyChListen Append, k:%v, v:%v", 
+						kv.me, opEntry.Key, opEntry.Value)
 				kv.dbAppend(opEntry.Key, opEntry.Value)
 				kv.dupOpTableSet(opEntry.ClientId, 
 					DupOpElem{seqNum: opEntry.SeqNum}) 

@@ -195,15 +195,6 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 				}
 			}
 		}
-		DPrintf("PARTITIONING INTO TWO GROUPS:")
-		for i := 0; i < len(pa[0]); i ++ {
-			fmt.Printf("%v ", pa[0][i])
-		}
-		fmt.Printf("\n")
-		for i := 0; i < len(pa[1]); i ++ {
-			fmt.Printf("%v ", pa[1][i])
-		}
-		fmt.Printf("\n")
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
@@ -541,7 +532,10 @@ func TestOnePartition3A(t *testing.T) {
 	cfg.ConnectClient(ckp2a, cfg.All())
 	cfg.ConnectClient(ckp2b, cfg.All())
 
-	time.Sleep(electionTimeout)
+	
+	DPrintf("STARTED SLEEPING")
+	time.Sleep(5*electionTimeout)
+	DPrintf("FINISHED SLEEPING")
 
 	select {
 	case <-done0:
