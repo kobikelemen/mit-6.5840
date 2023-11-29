@@ -55,7 +55,7 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 
 func check_same_config(t *testing.T, c1 Config, c2 Config) {
 	if c1.Num != c2.Num {
-		t.Fatalf("Num wrong")
+		t.Fatalf("Num wrong, %v vs %v", c1.Num, c2.Num)
 	}
 	if c1.Shards != c2.Shards {
 		t.Fatalf("Shards wrong")
@@ -93,15 +93,19 @@ func TestBasic(t *testing.T) {
 	check(t, []int{}, ck)
 
 	var gid1 int = 1
+	DPrintf("TEST: JOIN")
 	ck.Join(map[int][]string{gid1: []string{"x", "y", "z"}})
 	check(t, []int{gid1}, ck)
+	DPrintf("TEST: QUERY")
 	cfa[1] = ck.Query(-1)
 
 	var gid2 int = 2
+	DPrintf("TEST: JOIN")
 	ck.Join(map[int][]string{gid2: []string{"a", "b", "c"}})
 	check(t, []int{gid1, gid2}, ck)
+	DPrintf("TEST: QUERY")
 	cfa[2] = ck.Query(-1)
-
+	DPrintf("TEST: QUERY")
 	cfx := ck.Query(-1)
 	sa1 := cfx.Groups[gid1]
 	if len(sa1) != 3 || sa1[0] != "x" || sa1[1] != "y" || sa1[2] != "z" {
@@ -111,7 +115,7 @@ func TestBasic(t *testing.T) {
 	if len(sa2) != 3 || sa2[0] != "a" || sa2[1] != "b" || sa2[2] != "c" {
 		t.Fatalf("wrong servers for gid %v: %v\n", gid2, sa2)
 	}
-
+	DPrintf("TEST: LEAVE")
 	ck.Leave([]int{gid1})
 	check(t, []int{gid2}, ck)
 	cfa[4] = ck.Query(-1)
@@ -126,6 +130,7 @@ func TestBasic(t *testing.T) {
 	for s := 0; s < nservers; s++ {
 		cfg.ShutdownServer(s)
 		for i := 0; i < len(cfa); i++ {
+			DPrintf("TEST: QUERY, config num: %v", cfa[i].Num)
 			c := ck.Query(cfa[i].Num)
 			check_same_config(t, c, cfa[i])
 		}
