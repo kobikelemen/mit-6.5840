@@ -14,6 +14,7 @@ import "io/ioutil"
 const linearizabilityCheckTimeout = 1 * time.Second
 
 func check(t *testing.T, ck *Clerk, key string, value string) {
+	DPrintf("TEST: Get(%v)", key)
 	v := ck.Get(key)
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
@@ -38,6 +39,7 @@ func TestStaticShards(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(20)
+		DPrintf("TEST: Put(%v, %v)", ka[i], va[i])
 		ck.Put(ka[i], va[i])
 	}
 	for i := 0; i < n; i++ {

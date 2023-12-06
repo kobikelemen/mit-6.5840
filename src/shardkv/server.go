@@ -1,18 +1,48 @@
 package shardkv
 
-
+import "6.5840/shardctrler"
 import "6.5840/labrpc"
 import "6.5840/raft"
 import "sync"
 import "6.5840/labgob"
-
+import "time"
 
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Idx			int
+	Term		int
+	OpType  	string // "Get", "Put", or "Append"
+	// ID 			int64
+	Key			string
+	Value 		string
+
+	// client info
+	ClientId	int64
+	SeqNum 		int
+
+	NewConfig shardctrler.Config
 }
+
+type DupOpElem struct {
+	seqNum		int
+	res			string
+}
+
+func (kv *ShardKV) dupOpTableGet(clientId int64) (DupOpElem, bool) {
+	// kv.dupOpMu.Lock()
+	dupOpElem, ok := kv.dupOpTable[clientId]
+	// kv.dupOpMu.Unlock()
+	return dupOpElem, ok
+}
+
+func (kv *ShardKV) dupOpTableSet(clientId int64, dupOpElem DupOpElem) {
+	// kv.dupOpMu.Lock()
+	DPrintf("S%v, dupOpTableSET() clientId:%v seqNum:%v", kv.me, clientId, dupOpElem.seqNum)
+	kv.dupOpTable[clientId] = dupOpElem
+	// kv.dupOpMu.Unlock()
+}
+
+
 
 type ShardKV struct {
 	mu           sync.Mutex
@@ -24,17 +54,239 @@ type ShardKV struct {
 	ctrlers      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	ctrlClerk 	 *shardctrler.Clerk
+	config 		 shardctrler.Config
+	db 			 map[string]string
+	dupOpTable	 map[int64]DupOpElem // indexed by client Id
+							 		 // indicates if current 
+									 // req is duplicate
+}
+
+func (kv *ShardKV) SwapShards(args *SwapShardsArgs, 
+							reply *SwapShardsReply) {
+	// RPC
+	// acquires swap shards lock
+	// ... ??
+}
+
+func (kv *ShardKV) changeConfig(op Op) {
+	DPrintf("S%v, changeConfig()", kv.me)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.config.Num = op.NewConfig.Num
+	copy(kv.config.Shards[:], op.NewConfig.Shards[:])
+	kv.config.Groups = make(map[int][]string)
+	for k, v := range op.NewConfig.Groups {
+		kv.config.Groups[k] = v
+	}
+
+	if op.NewConfig.Num > 1 {
+		return	
+		// TODO
+		// call RPC on other group involved to swap shards
+		// use make_end to convert gid to actual server
+	}
+}
+
+func (kv *ShardKV) listenChangeConfig() {
+	for {
+		time.Sleep(time.Duration(100) * time.Millisecond)
+		newestConfig := kv.ctrlClerk.Query(-1)
+		if kv.config.Num != newestConfig.Num {
+			op := Op{OpType: "ChangeConfig", 
+					 NewConfig: newestConfig}
+			DPrintf("S%v, submitting CONFIG to raft", kv.me)
+			// if I'm not leader then kv.rf.Start() won't do anything
+			kv.rf.Start(op)
+		}
+	}
+}
+
+func (kv *ShardKV) isAtleastFirstConfig() bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.config.Num >= 1
+}
+
+
+
+func (kv *ShardKV) dbGet(key string) string {
+	DPrintf("S%v, dbGet()", kv.me)
+	val, ok := kv.db[key]
+	if ok {
+		return val
+	}
+	return ""
+}
+
+
+func (kv *ShardKV) dbAppend(key, newval string) {
+	DPrintf("S%v, dbAppend()", kv.me)
+	val, ok := kv.db[key]
+	if ok {
+		kv.db[key] = val + newval
+		return
+	}
+	kv.db[key] = newval
+
+}
+
+
+func (kv *ShardKV) dbPut(key, newval string) {
+	DPrintf("S%v, dbPut()", kv.me)
+	kv.db[key] = newval
+}
+
+
+func (kv *ShardKV) isMyShard(key string) bool {
+	iShard := key2shard(key)
+	return kv.config.Shards[iShard] == kv.gid
 }
 
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	DPrintf("S%v, RECV GET, key:%v", kv.me, args.Key)
+	for !kv.isAtleastFirstConfig() {
+		// wait until first config set
+		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if !kv.isMyShard(args.Key) {
+		reply.Err = ErrWrongGroup
+		return
+	}
+	dupOpElem, ok := kv.dupOpTableGet(args.ClientId)
+	if !ok {
+		// first request from client
+		DPrintf("S%v, first request from C:%v", kv.me, args.ClientId)
+		kv.dupOpTableSet(args.ClientId, DupOpElem{-1, ""})	
+		dupOpElem.seqNum = -1
+	}
+	if dupOpElem.seqNum != args.SeqNum {
+		op := Op{OpType: "Get", 
+					  Key: args.Key,
+					  ClientId: args.ClientId, 
+					  SeqNum: args.SeqNum}
+		DPrintf("S%v, submitting to raft", kv.me)
+		_, _, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			DPrintf("S%v,  wrong leader", kv.me)
+			reply.Err = ErrWrongLeader
+			return
+		} else {
+			// wait for applyCh
+			DPrintf("S%v, waiting for applyCh", kv.me)
+			dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			for dupOpElem.seqNum != args.SeqNum {
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			}
+		}
+	} else {
+		DPrintf("S%v, DUPLICATE req", kv.me)
+	}
+	DPrintf("S%v, SUCCESS", kv.me)
+	reply.Value = dupOpElem.res
+	reply.Err = OK
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	
+	DPrintf("S%v, RECV PUTAPPEND, key:%v, val:%v", kv.me, args.Key, args.Value)
+	for !kv.isAtleastFirstConfig() {
+		// wait until first config set
+		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if !kv.isMyShard(args.Key) {
+		reply.Err = ErrWrongGroup
+		return
+	}
+	dupOpElem, ok := kv.dupOpTableGet(args.ClientId)
+	if !ok {
+		// first request from client
+		DPrintf("S%v, first request from C:%v", kv.me, args.ClientId)
+		kv.dupOpTableSet(args.ClientId, DupOpElem{-1, ""})
+		dupOpElem.seqNum = -1
+	}
+	if dupOpElem.seqNum != args.SeqNum {
+		op := Op{OpType: args.Op,
+				 Key: args.Key,
+				 Value: args.Value,
+				 ClientId: args.ClientId, 
+				 SeqNum: args.SeqNum}
+		DPrintf("S%v, submitting to raft", kv.me)
+		_, _, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			DPrintf("S%v, wrong leader", kv.me)
+			reply.Err = ErrWrongLeader
+			return
+		} else {
+			// wait for applyCh
+			DPrintf("S%v, waiting for applyCh", kv.me)
+			dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			for dupOpElem.seqNum != args.SeqNum {
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				dupOpElem, _ = kv.dupOpTableGet(args.ClientId)
+			}
+		}
+	} else {
+		DPrintf("S%v, DUPLICATE req, clientId:%v, seqNum:%v", kv.me, args.ClientId, args.SeqNum)
+	}
+	DPrintf("S%v, SUCCESS", kv.me)
+	reply.Err = OK
 }
+
+func (kv *ShardKV) get(op Op) {
+	res := kv.dbGet(op.Key)
+	DPrintf("S%v, get(), key:%v, val:%v, db:%v", kv.me, op.Key, res, kv.db)
+	kv.dupOpTableSet(op.ClientId, DupOpElem{seqNum: op.SeqNum, res: res})
+}
+
+func (kv *ShardKV) put(op Op) {
+	DPrintf("S%v, put(), key:%v, val:%v", kv.me, op.Key, op.Value)
+	kv.dbPut(op.Key, op.Value)
+	DPrintf("S%v, db:%v", kv.me, kv.db)
+	kv.dupOpTableSet(op.ClientId, DupOpElem{seqNum: op.SeqNum}) 
+}
+
+func (kv *ShardKV) append(op Op) {
+	DPrintf("S%v, append(), key:%v, val:%v", kv.me, op.Key, op.Value)
+	kv.dbAppend(op.Key, op.Value)
+	kv.dupOpTableSet(op.ClientId, DupOpElem{seqNum: op.SeqNum}) 
+}
+
+
+func (kv *ShardKV) applyChListen() {
+	for msg := range kv.applyCh {
+		DPrintf("S%v, msg recv from applyCh", kv.me)
+		if msg.CommandValid {
+			op, ok := msg.Command.(Op)
+			if !ok {
+				DPrintf("S%v, msg recv from applyCh is wrong type", kv.me)
+				break
+			}
+			if op.OpType == "Get" {
+				DPrintf("S%v, applyChListen Get, k:%v", 
+						kv.me, op.Key)
+				kv.get(op)
+			} else if op.OpType == "Put" {
+				DPrintf("S%v, applyChListen Put, k:%v, v:%v", 
+						kv.me, op.Key, op.Value)
+				kv.put(op)
+			} else if op.OpType == "Append" {
+				DPrintf("S%v, applyChListen Append, k:%v, v:%v", 
+						kv.me, op.Key, op.Value)
+				kv.append(op)
+			} else if op.OpType == "ChangeConfig" {
+				kv.changeConfig(op)
+			}
+		}
+	}
+}
+
 
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
@@ -42,7 +294,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // turn off debug output from this instance.
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
-	// Your code here, if desired.
 }
 
 
@@ -76,22 +327,21 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.ctrlers = ctrlers
-
-	// Your initialization code here.
-
-	// Use something like this to talk to the shardctrler:
-	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-
+	kv.config.Num = 0
+	kv.ctrlClerk = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.dupOpTable = make(map[int64]DupOpElem)
+	kv.db = make(map[string]string)
 
+	go kv.listenChangeConfig()
+	go kv.applyChListen()
 
 	return kv
 }

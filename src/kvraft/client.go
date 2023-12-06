@@ -75,8 +75,8 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{Key : key, 
 						  Value : value, 
-						  Op : op, ClientId: 
-						  ck.clientId, 
+						  Op : op, 
+						  ClientId: ck.clientId, 
 						  SeqNum: ck.seqNum}
 	reply := PutAppendReply{}
 	ck.seqNum ++

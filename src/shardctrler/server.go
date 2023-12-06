@@ -386,7 +386,6 @@ func (sc *ShardCtrler) balanceShardsMin(gidToNShard map[int]int) (int, int) {
 
 func (sc *ShardCtrler) balanceShardsCount(gidToNShard map[int]int) {
 	for gid := range sc.configs[len(sc.configs)-1].Groups {
-		// DPrintf("S%v, balanceShardsCount() adding 0", sc.me)
 		gidToNShard[gid] = 0
 	}
 	for s := 0; s < NShards; s ++ {
@@ -398,14 +397,6 @@ func (sc *ShardCtrler) balanceShardsCount(gidToNShard map[int]int) {
 			gidToNShard[gid] ++
 		}
 	}
-	// for _, gid := range sc.configs[len(sc.configs)-1].Shards {
-	// 	_, ok := gidToNShard[gid]
-	// 	if !ok {
-	// 		gidToNShard[gid] = 1
-	// 	} else {
-	// 		gidToNShard[gid] ++
-	// 	}
-	// }
 }
 
 func (sc *ShardCtrler) balanceShards(config *Config) {
