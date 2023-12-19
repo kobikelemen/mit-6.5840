@@ -20,11 +20,11 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
 	ClientId int64
-	SeqNum 	 int
+	SeqNum   int
 }
 
 type PutAppendReply struct {
@@ -32,9 +32,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
+	Key      string
 	ClientId int64
-	SeqNum 	 int
+	SeqNum   int
 }
 
 type GetReply struct {
@@ -42,11 +42,12 @@ type GetReply struct {
 	Value string
 }
 
+type SendShardsArgs struct {
+	NewShards map[string]string
+	// ConfigNum int
 
-type SwapShardsArgs struct {
-	// TODO
 }
 
-type SwapShardsReply struct {
-	// TODO
+type SendShardsReply struct {
+	Err
 }
