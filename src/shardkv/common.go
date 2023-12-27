@@ -42,12 +42,11 @@ type GetReply struct {
 	Value string
 }
 
-type SendShardsArgs struct {
-	NewShards map[string]string
-	// ConfigNum int
-
+type GetShardsArgs struct {
+	Shards []int
 }
 
-type SendShardsReply struct {
+type GetShardsReply struct {
+	Data map[string]string
 	Err
 }

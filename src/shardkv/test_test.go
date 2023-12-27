@@ -101,7 +101,7 @@ func TestJoinLeave(t *testing.T) {
 	defer cfg.cleanup()
 
 	ck := cfg.makeClient()
-
+	DPrintf("TEST: join(0)")
 	cfg.join(0)
 
 	n := 10
@@ -110,21 +110,23 @@ func TestJoinLeave(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(5)
+		DPrintf("TEST: put(k:%v, v:%v)", ka[i], va[i])
 		ck.Put(ka[i], va[i])
 	}
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	DPrintf("TEST: join(1)")
 	cfg.join(1)
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
+		DPrintf("TEST: append(k:%v, v:%v)", ka[i], va[i])
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
-
+	DPrintf("TEST: leave(0)")
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {

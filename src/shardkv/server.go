@@ -63,32 +63,6 @@ type ShardKV struct {
 	// req is duplicate
 }
 
-func (kv *ShardKV) SendShards(args *SendShardsArgs,
-	reply *SendShardsReply) {
-	kv.muDb.Lock()
-	defer kv.muDb.Unlock()
-	op := Op{OpType: "AddShards",
-		NewShards: args.NewShards}
-	reply.Err = OK
-}
-
-func (kv *ShardKV) addShardsToDb(newKVs map[string]string) {
-	// TODO add key key-vals to my db
-}
-
-func (kv *ShardKV) recvedAllShards() bool {
-	kv.muDb.Lock()
-	defer kv.muDb.Unlock()
-	// TODO iterate over kv.db to check if I've recvied all shards
-	// from other servers
-}
-
-func (kv *ShardKV) getShardsToSend(gid int) map[string]string {
-	// TODO returns key-val map that need to be sent
-	// to given group
-
-}
-
 func (kv *ShardKV) copyOpConfig(newConfig shardctrler.Config) {
 	kv.config.Num = newConfig.Num
 	copy(kv.config.Shards[:], newConfig.Shards[:])
@@ -98,30 +72,75 @@ func (kv *ShardKV) copyOpConfig(newConfig shardctrler.Config) {
 	}
 }
 
-func (kv *ShardKV) sendShardsToGroup(shardsToSend map[string]string) {
+// Returns map of gid to shards required to get from other
+// groups for new config
+func (kv *ShardKV) getNewGidsToShardsMap() map[int][]int {
+	shardsINeed := kv.config.Shards
+	shardsIHave := make(map[int]bool)
+	shardsToGet := make(map[int][]int) // gid -> shards slice map
+	for k, _ := range kv.db {
+		shard := key2shard(k)
+		shardsIHave[shard] = true
+	}
+	for shardINeed, gid := range shardsINeed {
+		_, contains := shardsIHave[shardINeed]
+		if !contains {
+			shardsToGet[gid] = append(shardsToGet[gid], shardINeed)
+		}
+	}
+	return shardsToGet
+}
 
+func (kv *ShardKV) GetShards(args *GetShardsArgs,
+							reply *GetShardsReply) {
+	DPrintf("S%v, GID:%v, GetShards()", kv.me, kv.gid)
+	data := make(map[string]string)
+	for k, v := range kv.db {
+		for _, shard := range args.Shards {
+			if shard == key2shard(k) {
+				data[k] = v
+			}
+		}
+	}
+	reply.Data = data
+	reply.Err = OK
+}
+
+// Calls GetShards RPC for each server in group gid until leader
+// returns db contents corresponding to shards
+func (kv *ShardKV) getDataFromGroup(gid int, shards []int) map[string]string {
+	if servers, ok := kv.config.Groups[gid]; ok {
+		for si := 0; si < len(servers); si ++ {
+			args := GetShardsArgs{Shards: shards}
+			reply := GetShardsReply{}
+			srvEnd := kv.make_end(servers[si])
+			ok := srvEnd.Call("ShardKV.GetShards", &args, &reply)
+			if ok && reply.Err == OK {
+				return reply.Data
+			} else {
+				// could not be leader or failed RPC
+			}
+		}
+	} else {
+		// TODO error
+	}
+	return make(map[string]string)
 }
 
 func (kv *ShardKV) changeConfig(op Op) {
-	DPrintf("S%v, changeConfig()", kv.me)
+	DPrintf("S%v, GID:%v, changeConfig()", kv.me, kv.gid)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	kv.copyOpConfig(op.NewConfig)
 
-	// TODO change following if condition so only done if I am leader
-	// (don't want it to be sent many times)
 	if op.NewConfig.Num > 1 {
-		// TODO
-		// call RPC on other groups involved to send my shards
-		// use make_end to convert gid to actual server
-		// wait for other groups to send stuff to me
-		for gid, _ := range kv.config.Groups {
-			shardsToSend := kv.getShardsToSend(gid)
-			kv.sendShardsToGroup(shardsToSend)
-			// TODO call SendShards RPC
-		}
-		for !kv.recvedAllShards() {
-			// wait
+		// get gids that contains shards I want
+		// send those groups GetShards RPCs
+		// add those shards to my db (not adding to log? bc all replicas already do changeConfig log entry?)
+		newGidsToShardsMap := kv.getNewGidsToShardsMap()
+		for gid, shards := range newGidsToShardsMap {
+			data := kv.getDataFromGroup(gid, shards)
+			kv.dbBulkAdd(data)
 		}
 	}
 }
@@ -144,6 +163,17 @@ func (kv *ShardKV) isAtleastFirstConfig() bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	return kv.config.Num >= 1
+}
+
+func (kv *ShardKV) dbBulkAdd(data map[string]string) {
+	for k, v := range data {
+		val, ok := kv.db[k]
+		if ok {
+			kv.db[k] = val + v
+			return
+		}
+		kv.db[k] = v
+	}
 }
 
 func (kv *ShardKV) dbGet(key string) string {
