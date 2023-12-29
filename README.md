@@ -1,19 +1,14 @@
 # mit-6.5840
-My attempt at doing the coursework for mit-6.5840 distributed systems
+My coursework for mit-6.5840 distributed systems: [https://pdos.csail.mit.edu/6.824/index.html].
 
-I am completing the following course focused on distributed systems: https://pdos.csail.mit.edu/6.824/index.html 
-
-This project aims to build a fault tolerant, parallel, key value service.
-
-## What does this mean? 
-A key value service is a program that takes in data and for each element in the data - the 'key' - it does some computation to get the associated value. An example is counting the occurences of each word in some text. In this case, the data is the text, the keys are the words, and the values are the number of occurences of that word.
-The goal of this project is to run this key value service on a distributed system of many computers to increase performance. For this to produce valid results, the distributed system must be fault tolerant. And the computation must be split in a way that allows it to be performed on many computers in parallel.
-
-## Key Value Service [Done]
-The key value service I implement is Map Reduce [https://pdos.csail.mit.edu/6.824/papers/mapreduce.pdf]. This takes in three things: the data, a 'mapping' function, and a 'reduce' function. The data is first split into chunks so that each computer processes a subset of it. The mapping function is then run on each chunk to produce the key value pairs and saved in intermediate files. The reduce function is then run to collate the pairs into an overall result. Please refer to the paper for a more detailed explanation and examples.
+## Project Overview 
+A key value service is a simple database that stores data (values) with an associated key. The goal of this project is to build a key value service on a distributed system with three key features: fault tolerance, linearizability, and sharding the data.
 
 ## Fault Tolerance [Done]
 A major problem faced when building distributed systems is that each computer must remain in sync with eachother even when individual computers fail or the network fails. To achieve this, I implemented the RAFT Protocol [https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf] which solves this problem by electing a leader copmuter which coordinates the computers, and is responsible for replicating its state machine on all peers. This code can be found in the `src/main/raft` directory.
 
-## Sharded Key Value Service [In progress] 
-The goal of this is to run the key value service on the fault tolerant distributed system, such that the service is run in parallel across the system.
+## Key Value Service [Done]
+Using the fault tolerance provided by my RAFT implementation, I built a replicated key-value store. I expose two operations; put() and get(). Moreover, by using RAFT, operations on the key-value store are linearizable and the service is fault tolerant. 
+
+## Sharded Key Value Service [Done] 
+I improved the key-value service by sharding the keys into groups that can be run in parallel. Each shard consists of a subset of the total keys stored in the key-value store (e.g. keys starting with "A"-"D" could be in one shard). Moreover the machines in the cluster are split into replication groups, where each group forms a a fault tolerant Raft group that stores a few of the shards. This means that shards in different groups can be queried in parallel, increasing performance. There is also a fault tolerant coordinator, which manages group configerations (such as which shards map to which groups). This design was inspired by systems such as Spanner [https://static.googleusercontent.com/media/research.google.com/en//archive/spanner-osdi2012.pdf].
